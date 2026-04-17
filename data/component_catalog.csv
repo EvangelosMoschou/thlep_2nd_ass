@@ -1,0 +1,26 @@
+component_uid,component_name,part_number,gain_loss_db,noise_figure_db,phase_noise_dbchz,output_power_db,p1db_db,oip3_db,iip3_db,comment
+SPST_SWITCH_01,SPST switch,MA4AGSW1,-0.3,,,,,,,Disconnects the Rx during Tx
+FILTER_1_01,Filter 1,ZVBP-K27G+,-0.4,0.4,,,,,,ultra low insertion loss
+FILTER_1_02,Filter 1,BFHK-2492+,-1.66,1.66,,,,,,
+LNA_1_01,LNA 1,PMA3-34GLN+,23.96,1.8364,,,10.5,22.7,,
+LNA_1_02,LNA 1,ZVA-24443G1X+,44.27,2.36,,,21.42,28.18,,better dynamic range
+LNA_1_03,LNA 1,ADL8142S,29,1.8,,,8.5,17.5,,slightly lower NF
+MIXER_1_01,Mixer 1,SMIQ-134H+,-7.4,7.4,,needs 17-19,17,,25,probably best
+MIXER_1_02,Mixer 1,ADMV1530,-7,7,,needs 17-21,17,,27,
+MIXER_1_03,Mixer 1,ADMV1555ACCZ,-8,,,needs 19-23,20,,20,
+MIXER_1_04,Mixer 1,CMD180C3,-7,7,,needs 21db,10,,18,
+LO_1_01,LO 1,HMC738LP4E,,,-95,3-15,,,,
+LO_1_AMP_01,LO 1 AMP,SPA-210-12-004-K,12,4,,,26,35,,
+FILTER_2_01,Filter 2,SXBP-1430+,-0.6(?),0.6,,,,,,Extremely low insertion loss
+FILTER_2_02,Filter 2,CBP-1450F+,-1,1,,,,,,Extremely narrow
+FILTER_2_03,Filter 2,FMFL1012,-1.5,,,,,,,,
+LNA_2_01,LNA 2,SAV-541-DG+,23.7,0.27,,,18.5,27.8,,
+LNA_2_02,LNA 2,PMA4-33GLN+,31.8,0.66,,,22.6,41,,not very linear
+MIXER_2_01,Mixer 2,SYM-25DHW+,-6.5,,,needs 17-19,14,,30,
+MIXER_2_02,Mixer 2,SYM-30DHW+,-6.5,,,needs 17-19,14,,26,
+LO_2_01,LO 2,ROS-1600W+,9,,-143 (crosscheck),9dBm,,,,
+LO_2_AMP_01,LO 2 AMP,PMA5-83-2W+,12,3.7,,,30,44,,
+FILTER_3_01,Filter 3,BFTC-500+,-3,,,,,,,,
+LNA_3_01,LNA 3,ZHL-20W-13SWX+,50,3.5,,,41,43,,
+LNA_3_02,LNA 3,PHA-13HLN+,22.7,1.1,,,28.7,43,,
+LIMITER_01,Limiter,RLM-751-2WL+,,,,,,,,Tell me if the gain to see if we need more attenuation

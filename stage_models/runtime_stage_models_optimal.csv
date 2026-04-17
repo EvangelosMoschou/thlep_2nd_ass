@@ -1,0 +1,14 @@
+chain,name,gain_db,nf_db,filter_len,auto_gain_to_vpp,target_vpp,enabled
+baseband_rx,RF_BPF,-0.4,0.4,3,0,0.0,1
+baseband_rx,LNA1,29.0,1.8,1,0,0.0,1
+baseband_rx,MIX_Downconversion,-7.4,7.4,1,0,0.0,1
+baseband_rx,BPF2,-2.2,2.2,3,0,0.0,1
+baseband_rx,LNA3,24.0,0.5,1,1,1.0,1
+rf_frontend,RF_BPF,-0.4,0.4,3,0,0.0,1
+rf_frontend,LNA1,15.0,0.9,1,0,0.0,1
+rf_frontend,IRF,-0.4,0.4,3,0,0.0,1
+rf_frontend,MIX1_Downconv,-3.0,3.0,1,0,0.0,1
+rf_frontend,IF1_BPF,-0.4,0.4,3,0,0.0,1
+rf_frontend,LNA2,14.0,0.9,1,0,0.0,1
+rf_postmix_bb,BPF2,-2.2,2.2,9600,0,0.0,1
+rf_postmix_bb,LNA3,24.0,0.5,1,1,1.0,1
