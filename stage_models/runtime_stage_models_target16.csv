@@ -1,17 +1,18 @@
-# Optional profile tuned for higher ADC-side SNR (~16 dB target in current model).
-# Required columns: chain,name,gain_db,nf_db
-# Optional columns: filter_len,auto_gain_to_vpp,target_vpp,enabled
 chain,name,gain_db,nf_db,filter_len,auto_gain_to_vpp,target_vpp,enabled
-baseband_rx,RF_BPF,-0.4,0.4,3,0,0.0,1
-baseband_rx,LNA1,29.0,1.8,1,0,0.0,1
-baseband_rx,MIX_Downconversion,-7.4,7.4,1,0,0.0,1
-baseband_rx,BPF2,-2.2,2.2,3,0,0.0,1
-baseband_rx,LNA3,24.0,0.5,1,1,1.0,1
-rf_frontend,RF_BPF,-1.66,0.6,3,0,0.0,1
-rf_frontend,LNA1,15.0,0.9,1,0,0.0,1
-rf_frontend,IRF,-0.4,0.4,3,0,0.0,1
-rf_frontend,MIX1_Downconv,-3.0,3.0,1,0,0.0,1
-rf_frontend,IF1_BPF,-0.4,0.4,3,0,0.0,1
-rf_frontend,LNA2,14.0,0.9,1,0,0.0,1
-rf_postmix_bb,BPF2,-2.2,2.2,9600,0,0.0,1
-rf_postmix_bb,LNA3,24.0,0.5,1,1,1.0,1
+baseband_rx,bb_01_rf_bpf_zvbp_k27g,-0.400000,0.400000,3,0,0.0,1
+baseband_rx,bb_02_lna_adl8142s,29.000000,1.800000,1,0,0.0,1
+baseband_rx,bb_03_irf_sxbp_1430,-0.600000,0.600000,5,0,0.0,1
+baseband_rx,bb_04_mixer_simple_hmc264lc3b,-9.000000,9.000000,1,0,0.0,1
+baseband_rx,bb_05_if1_bpf_sxbp_1430,-0.600000,0.600000,5,0,0.0,1
+baseband_rx,bb_06_lna_sav_541_dg,23.700000,0.270000,1,0,0.0,1
+baseband_rx,bb_07_mixer_sym_25dhw,-6.500000,6.500000,1,0,0.0,1
+baseband_rx,bb_08_bpf_bftc_500,-3.000000,3.000000,5,0,0.0,1
+baseband_rx,bb_09_lna_zhl_20w_13swx,50.000000,3.500000,1,1,1.0,1
+rf_frontend,rf_01_rf_bpf_zvbp_k27g,-0.400000,0.400000,3,0,0.0,1
+rf_frontend,rf_02_lna_adl8142s,29.000000,1.800000,1,0,0.0,1
+rf_frontend,rf_03_irf_sxbp_1430,-0.600000,0.600000,5,0,0.0,1
+rf_postmix_bb,post_01_if1_bpf_sxbp_1430,-0.600000,0.600000,5,0,0.0,1
+rf_postmix_bb,post_02_lna_sav_541_dg,23.700000,0.270000,1,0,0.0,1
+rf_postmix_bb,post_03_mixer_sym_25dhw,-6.500000,6.500000,1,0,0.0,1
+rf_postmix_bb,post_04_bpf_bftc_500,-3.000000,3.000000,5,0,0.0,1
+rf_postmix_bb,post_05_lna_zhl_20w_13swx,50.000000,3.500000,1,1,1.0,1

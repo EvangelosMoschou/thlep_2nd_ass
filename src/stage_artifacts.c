@@ -866,9 +866,29 @@ static int write_constellation_svg(
     double scaled_h;     /* Actual plot height in pixels after uniform scaling */
     double x_origin;     /* Pixel X position of data xmin */
     double y_origin;     /* Pixel Y position of data ymin */
+    int density_mode;
+    size_t plot_n;
+    size_t plot_step;
+    unsigned int* density_bins;
+    const size_t density_bins_x = 24u;
+    const size_t density_bins_y = 24u;
+    unsigned int density_max;
+    double ref_opacity = 0.35;
+    const double sig_opacity = 0.65;
+    double ref_radius = 4.0;
 
     if (!path || !ref || !sig || n == 0u) {
         return -1;
+    }
+
+    density_mode = (title && strstr(title, "(Perfect)") != NULL);
+    plot_n = n;
+    plot_step = 1u;
+    density_bins = NULL;
+    density_max = 0u;
+    if (density_mode) {
+        ref_opacity = 0.22;
+        ref_radius = 3.0;
     }
 
     /* --- Step 1: Find data ranges for auto-scaling --- */
@@ -928,6 +948,52 @@ static int write_constellation_svg(
         return -2;
     }
 
+    if (density_mode) {
+        size_t bx;
+        size_t by;
+        const double bin_scale_x = (density_bins_x > 0u) ? ((double)density_bins_x / span_x) : 0.0;
+        const double bin_scale_y = (density_bins_y > 0u) ? ((double)density_bins_y / span_y) : 0.0;
+
+        plot_n = (n > 1024u) ? 1024u : n;
+        if (plot_n == 0u) {
+            plot_n = 1u;
+        }
+        plot_step = (n + plot_n - 1u) / plot_n;
+
+        density_bins = (unsigned int*)calloc(density_bins_x * density_bins_y, sizeof(unsigned int));
+        if (!density_bins) {
+            density_mode = 0;
+            plot_n = n;
+            plot_step = 1u;
+        } else {
+            for (i = 0u; i < n; ++i) {
+                size_t cell;
+                if (bin_scale_x <= 0.0 || bin_scale_y <= 0.0) {
+                    break;
+                }
+
+                bx = (size_t)((sig[i].re - xmin) * bin_scale_x);
+                by = (size_t)((sig[i].im - ymin) * bin_scale_y);
+
+                if ((double)bx >= (double)density_bins_x) {
+                    bx = density_bins_x - 1u;
+                }
+                if ((double)by >= (double)density_bins_y) {
+                    by = density_bins_y - 1u;
+                }
+
+                cell = by * density_bins_x + bx;
+                density_bins[cell] += 1u;
+                if (density_bins[cell] > density_max) {
+                    density_max = density_bins[cell];
+                }
+            }
+
+            plot_n = density_bins_x * density_bins_y;
+            plot_step = (density_max >= 4u) ? 2u : 1u;
+        }
+    }
+
     /* SVG document root with dimensions and viewBox */
     fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">\n", width, height, width, height);
 
@@ -936,6 +1002,19 @@ static int write_constellation_svg(
 
     /* Title text */
     fprintf(f, "<text x=\"%d\" y=\"30\" font-family=\"sans-serif\" font-size=\"24\" fill=\"#111827\">%s</text>\n", 80, title ? title : "64-APSK Constellation");
+
+    if (density_mode) {
+        fprintf(f,
+                "<defs>"
+                "<linearGradient id=\"densityGrad\" x1=\"0%%\" y1=\"0%%\" x2=\"100%%\" y2=\"0%%\">"
+                "<stop offset=\"0%%\" stop-color=\"#ef4444\"/>"
+                "<stop offset=\"100%%\" stop-color=\"#22c55e\"/>"
+                "</linearGradient>"
+                "<filter id=\"densityBlur\" x=\"-30%%\" y=\"-30%%\" width=\"160%%\" height=\"160%%\">"
+                "<feGaussianBlur stdDeviation=\"3.0\"/>"
+                "</filter>"
+                "</defs>\n");
+    }
 
     /* Plot area background (white rectangle with gray border) */
     fprintf(f, "<rect x=\"%.2f\" y=\"%.2f\" width=\"%.2f\" height=\"%.2f\" fill=\"white\" stroke=\"#d1d5db\"/>\n", (double)ml, (double)mt, plot_w, plot_h);
@@ -974,12 +1053,17 @@ static int write_constellation_svg(
     fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"5\" fill=\"#1d4ed8\" fill-opacity=\"0.55\" stroke=\"#1d4ed8\" stroke-width=\"0.8\"/>\n", (double)ml + 18.0, (double)mt + 20.0);
     fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Reference</text>\n", (double)ml + 32.0, (double)mt + 24.0);
 
-    /* Orange circle + "Received" label */
-    fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"5\" fill=\"#f97316\" fill-opacity=\"0.55\" stroke=\"#f97316\" stroke-width=\"0.8\"/>\n", (double)ml + 118.0, (double)mt + 20.0);
-    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Received</text>\n", (double)ml + 132.0, (double)mt + 24.0);
+    if (density_mode) {
+        fprintf(f, "<rect x=\"%.2f\" y=\"%.2f\" width=\"34\" height=\"10\" fill=\"url(#densityGrad)\" stroke=\"#94a3b8\" stroke-width=\"0.5\"/>\n", (double)ml + 108.0, (double)mt + 15.0);
+        fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Density low-high</text>\n", (double)ml + 150.0, (double)mt + 24.0);
+    } else {
+        /* Orange circle + "Received" label */
+        fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"5\" fill=\"#f97316\" fill-opacity=\"0.55\" stroke=\"#f97316\" stroke-width=\"0.8\"/>\n", (double)ml + 118.0, (double)mt + 20.0);
+        fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Received</text>\n", (double)ml + 132.0, (double)mt + 24.0);
+    }
 
     /* --- Step 5: Draw data points --- */
-    if (constellation_template && constellation_count > 0u) {
+    if (!density_mode && constellation_template && constellation_count > 0u) {
         for (i = 0u; i < constellation_count; ++i) {
             const double gx = x_origin + (constellation_template[i].re - xmin) * scale;
             const double gy = y_origin - (constellation_template[i].im - ymin) * scale;
@@ -992,19 +1076,58 @@ static int write_constellation_svg(
         const double rx = x_origin + (ref[i].re - xmin) * scale;
         const double ry = y_origin - (ref[i].im - ymin) * scale;
 
-        /* Convert received point's data coordinates to pixel coordinates */
-        const double sx = x_origin + (sig[i].re - xmin) * scale;
-        const double sy = y_origin - (sig[i].im - ymin) * scale;
-
         /* Blue dot for reference point (semi-transparent) */
-        fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"4\" fill=\"#1d4ed8\" fill-opacity=\"0.35\"/>\n", rx, ry);
+        fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"%.2f\" fill=\"#1d4ed8\" fill-opacity=\"%.2f\"/>\n", rx, ry, ref_radius, ref_opacity);
+    }
 
-        /* Orange dot for received point (more opaque, drawn on top) */
-        fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"3\" fill=\"#f97316\" fill-opacity=\"0.65\"/>\n", sx, sy);
+    if (density_mode && density_bins && density_max > 0u) {
+        const double cell_w_px = (span_x * scale) / (double)density_bins_x;
+        const double cell_h_px = (span_y * scale) / (double)density_bins_y;
+        const double blob_r = 1.18 * fmax(cell_w_px, cell_h_px);
+        const double cell_w_data = span_x / (double)density_bins_x;
+        const double cell_h_data = span_y / (double)density_bins_y;
+
+        fprintf(f, "<g filter=\"url(#densityBlur)\">\n");
+        for (i = 0u; i < plot_n; ++i) {
+            const size_t bx = i % density_bins_x;
+            const size_t by = i / density_bins_x;
+            const unsigned int density = density_bins[i];
+            double density_norm;
+            unsigned int red;
+            unsigned int green;
+            char density_color[16];
+            double cx;
+            double cy;
+            double opacity;
+
+            if (density < plot_step) {
+                continue;
+            }
+
+            density_norm = (double)density / (double)density_max;
+            red = (unsigned int)lround(255.0 * (1.0 - density_norm));
+            green = (unsigned int)lround(255.0 * density_norm);
+            if (red > 255u) red = 255u;
+            if (green > 255u) green = 255u;
+            snprintf(density_color, sizeof(density_color), "#%02x%02x00", red, green);
+
+            cx = x_origin + (((double)bx + 0.5) * cell_w_data) * scale;
+            cy = y_origin - (((double)by + 0.5) * cell_h_data) * scale;
+            opacity = 0.06 + 0.18 * density_norm;
+            fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"%.2f\" fill=\"%s\" fill-opacity=\"%.2f\"/>\n", cx, cy, blob_r, density_color, opacity);
+        }
+        fprintf(f, "</g>\n");
+    } else {
+        for (i = 0u; i < n; ++i) {
+            const double sx = x_origin + (sig[i].re - xmin) * scale;
+            const double sy = y_origin - (sig[i].im - ymin) * scale;
+            fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"3\" fill=\"#f97316\" fill-opacity=\"%.2f\"/>\n", sx, sy, sig_opacity);
+        }
     }
 
     fprintf(f, "</svg>\n");
     fclose(f);
+    free(density_bins);
     return 0;
 }
 
@@ -1460,8 +1583,48 @@ void write_constellation_stage_artifacts(
                 plot_sig_view = plot_sig;
             }
 
-        write_constellation_csv(csv_path, ref, sig, nsym);
-            write_constellation_svg(svg_path, constellation_template, constellation_count, plot_ref_view, plot_sig_view, plot_count, title);
+            /* Rescale realistic data to match template power for correct visual overlay */
+            {
+                double p_ref = 0.0, p_tmpl = 0.0;
+                double vis_scale = 1.0;
+                size_t ki;
+                for (ki = 0; ki < plot_count; ++ki) {
+                    p_ref += plot_ref_view[ki].re * plot_ref_view[ki].re + plot_ref_view[ki].im * plot_ref_view[ki].im;
+                }
+                for (ki = 0; ki < constellation_count; ++ki) {
+                    p_tmpl += constellation_template[ki].re * constellation_template[ki].re + constellation_template[ki].im * constellation_template[ki].im;
+                }
+                if (p_ref > 0.0 && plot_count > 0 && constellation_count > 0) {
+                    p_ref /= (double)plot_count;
+                    p_tmpl /= (double)constellation_count;
+                    vis_scale = sqrt(p_tmpl / p_ref);
+                }
+                /* Apply visual rescaling to a mutable copy */
+                if (vis_scale != 1.0 && vis_scale > 0.0 && vis_scale < 1e6) {
+                    Complex* vis_ref = (Complex*)malloc(plot_count * sizeof(Complex));
+                    Complex* vis_sig = (Complex*)malloc(plot_count * sizeof(Complex));
+                    if (vis_ref && vis_sig) {
+                        for (ki = 0; ki < plot_count; ++ki) {
+                            vis_ref[ki].re = plot_ref_view[ki].re * vis_scale;
+                            vis_ref[ki].im = plot_ref_view[ki].im * vis_scale;
+                            vis_sig[ki].re = plot_sig_view[ki].re * vis_scale;
+                            vis_sig[ki].im = plot_sig_view[ki].im * vis_scale;
+                        }
+                        write_constellation_csv(csv_path, ref, sig, nsym);
+                        write_constellation_svg(svg_path, constellation_template, constellation_count, vis_ref, vis_sig, plot_count, title);
+                        free(vis_ref);
+                        free(vis_sig);
+                    } else {
+                        write_constellation_csv(csv_path, ref, sig, nsym);
+                        write_constellation_svg(svg_path, constellation_template, constellation_count, plot_ref_view, plot_sig_view, plot_count, title);
+                        free(vis_ref);
+                        free(vis_sig);
+                    }
+                } else {
+                    write_constellation_csv(csv_path, ref, sig, nsym);
+                    write_constellation_svg(svg_path, constellation_template, constellation_count, plot_ref_view, plot_sig_view, plot_count, title);
+                }
+            }
 
             free(plot_ref);
             free(plot_sig);
@@ -1486,8 +1649,48 @@ void write_constellation_stage_artifacts(
                 plot_sig_view = plot_sig;
             }
 
-        write_constellation_csv(csv_path, ref, sig, nsym);
-            write_constellation_svg(svg_path, constellation_template, constellation_count, plot_ref_view, plot_sig_view, plot_count, title);
+            /* Rescale realistic data to match template power for correct visual overlay */
+            {
+                double p_ref = 0.0, p_tmpl = 0.0;
+                double vis_scale = 1.0;
+                size_t ki;
+                for (ki = 0; ki < plot_count; ++ki) {
+                    p_ref += plot_ref_view[ki].re * plot_ref_view[ki].re + plot_ref_view[ki].im * plot_ref_view[ki].im;
+                }
+                for (ki = 0; ki < constellation_count; ++ki) {
+                    p_tmpl += constellation_template[ki].re * constellation_template[ki].re + constellation_template[ki].im * constellation_template[ki].im;
+                }
+                if (p_ref > 0.0 && plot_count > 0 && constellation_count > 0) {
+                    p_ref /= (double)plot_count;
+                    p_tmpl /= (double)constellation_count;
+                    vis_scale = sqrt(p_tmpl / p_ref);
+                }
+                /* Apply visual rescaling to a mutable copy */
+                if (vis_scale != 1.0 && vis_scale > 0.0 && vis_scale < 1e6) {
+                    Complex* vis_ref = (Complex*)malloc(plot_count * sizeof(Complex));
+                    Complex* vis_sig = (Complex*)malloc(plot_count * sizeof(Complex));
+                    if (vis_ref && vis_sig) {
+                        for (ki = 0; ki < plot_count; ++ki) {
+                            vis_ref[ki].re = plot_ref_view[ki].re * vis_scale;
+                            vis_ref[ki].im = plot_ref_view[ki].im * vis_scale;
+                            vis_sig[ki].re = plot_sig_view[ki].re * vis_scale;
+                            vis_sig[ki].im = plot_sig_view[ki].im * vis_scale;
+                        }
+                        write_constellation_csv(csv_path, ref, sig, nsym);
+                        write_constellation_svg(svg_path, constellation_template, constellation_count, vis_ref, vis_sig, plot_count, title);
+                        free(vis_ref);
+                        free(vis_sig);
+                    } else {
+                        write_constellation_csv(csv_path, ref, sig, nsym);
+                        write_constellation_svg(svg_path, constellation_template, constellation_count, plot_ref_view, plot_sig_view, plot_count, title);
+                        free(vis_ref);
+                        free(vis_sig);
+                    }
+                } else {
+                    write_constellation_csv(csv_path, ref, sig, nsym);
+                    write_constellation_svg(svg_path, constellation_template, constellation_count, plot_ref_view, plot_sig_view, plot_count, title);
+                }
+            }
 
             free(plot_ref);
             free(plot_sig);

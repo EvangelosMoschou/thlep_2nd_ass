@@ -43,7 +43,7 @@ tx_data = randi([1 64], numSym, 1);
 tx_sym = constellation(tx_data);
 
 %% 3. Pulse Shaping (RRC) Fallback
-span = 6; % Symbol span for RRC
+span = 20; % Symbol span for RRC
 t = -span/2:1/sps:span/2;
 rrcFilter = zeros(size(t));
 for i = 1:length(t)
@@ -70,16 +70,19 @@ tx_sig = tx_sig / sqrt(mean(abs(tx_sig).^2)); % Use RMS power
 sig_in = tx_sig * sqrt(P_sig_in_W);
 
 %% 4. Define Stages
+% Format: {'Name', Gain_dB, NF_dB, P1dB_dBm, IP3_dBm, 'Ref_Port', PhaseNoise_dBcPerHz}
+% Ref_Port: 'In' (IIP3/IP1dB) or 'Out' (OIP3/OP1dB)
 stages = {
-    'RF BPF', -1.66, 0.6;
-    'LNA 1',   15.0, 0.9;
-    'IRF',    -0.4,  0.4;
-    'MIX 1',  -3.0,  3.0;
-    'IF 1 BPF',-0.4, 0.4;
-    'LNA 2',   14.0, 0.9;
-    'MIX 2 BB',-7.4, 7.4;
-    'BPF 2',  -2.2,  2.2;
-    'LNA 3',   24.0, 0.5
+    'RF BPF', -0.4, 0.4,   Inf,  Inf, 'In',  -Inf;
+    'LNA 1',   29.0, 1.8,   8.5, 17.5, 'Out', -Inf; % ADL8142S
+    'IRF',    -0.6, 0.6,   Inf,  Inf, 'In',  -Inf;
+    'MIX 1',  -9.0, 9.0,   2.0, 14.0, 'In',  -110;  % HMC264LC3B
+    'IF 1 BPF',-0.6, 0.6,   Inf,  Inf, 'In',  -Inf;
+    'LNA 2',   23.7, 0.27,  18.5, 27.8, 'Out', -Inf; % SAV-541-DG+
+    'MIX 2 BB',-6.5, 6.5,  14.0, 30.0, 'In',  -143;  % SYM-25DHW+
+    'BPF 2',  -3.0, 3.0,   Inf,  Inf, 'In',  -Inf;
+    'LNA 3',   50.0, 3.5,  41.0, 43.0, 'Out', -Inf; % ZHL-20W-13SWX+
+    'LIMITER', -0.5, 0.5,   Inf,  Inf, 'Out', -Inf  % Simulated strictly via voltage threshold below
 };
 
 numStages = size(stages, 1);
@@ -103,19 +106,68 @@ for i = 1:numStages
     name = stages{i, 1};
     g_db = stages{i, 2};
     nf_db = stages{i, 3};
+    p1db_spec = stages{i, 4};
+    ip3_spec = stages{i, 5};
+    ref_port = stages{i, 6};
+    pn_dbc = stages{i, 7};
     
     g_lin = 10^(g_db/10);
     f_lin = 10^(nf_db/10);
+    
+    % Translate everything to Input Referred (IIP3 and IP1dB)
+    if strcmp(ref_port, 'Out')
+        iip3_dbm = ip3_spec - g_db;
+        ip1db_dbm = p1db_spec - g_db;
+    else
+        iip3_dbm = ip3_spec;
+        ip1db_dbm = p1db_spec;
+    end
+    
+    % Keep the unamplified version for non-linear calculations
+    rx_chain_in = rx_chain;
     
     % Signal Amplification
     rx_chain = rx_chain * sqrt(g_lin);
     Gain_total_lin = Gain_total_lin * g_lin;
     
     % Add Stage Noise
-    % Noise added by a component at its own output is k*T0*B * G_local * (F_local - 1)
     P_added = N_t0 * g_lin * (f_lin - 1);
     local_noise = sqrt(P_added / 2) * (randn(size(rx_chain)) + 1j*randn(size(rx_chain)));
     rx_chain = rx_chain + local_noise;
+    
+    % Add Phase Noise from Local Oscillator (Mixer stages)
+    if pn_dbc > -1000
+        pn_var = 10^(pn_dbc/10) * B_noise;
+        phase_jitter = sqrt(pn_var) * randn(size(rx_chain));
+        rx_chain = rx_chain .* exp(1j * phase_jitter);
+    end
+    
+    % Apply Soft/Hard Clipping (P1dB & IP3)
+    if iip3_dbm < Inf || ip1db_dbm < Inf
+        if iip3_dbm < Inf
+            iip3_W = 10^((iip3_dbm - 30)/10);
+            compression_factor = (1/3) * (abs(rx_chain_in).^2 / iip3_W);
+            compression_factor(compression_factor > 0.9) = 0.9;
+            rx_chain = rx_chain .* (1 - compression_factor);
+        end
+        if ip1db_dbm < Inf
+            ip1db_W = 10^((ip1db_dbm - 30)/10);
+            P_in_inst = abs(rx_chain_in).^2;
+            clip_mask = P_in_inst > (ip1db_W * 0.794); % ~1dB before IP1dB
+            if any(clip_mask)
+                rx_chain(clip_mask) = rx_chain(clip_mask) .* sqrt(ip1db_W ./ P_in_inst(clip_mask));
+            end
+        end
+    end
+    if strcmp(name, 'LIMITER')
+        % Typical RF Limiter threshold set here to limit amplitude exceeding +10dBm (output)
+        lim_thresh_W = 10^((10.0 - 30)/10);
+        P_out_inst = abs(rx_chain).^2;
+        clip_mask = P_out_inst > lim_thresh_W;
+        if any(clip_mask)
+            rx_chain(clip_mask) = rx_chain(clip_mask) .* sqrt(lim_thresh_W ./ P_out_inst(clip_mask));
+        end
+    end
     
     % Update Noise Floor for SNR Tracking
     N_current = N_current * g_lin + P_added;
