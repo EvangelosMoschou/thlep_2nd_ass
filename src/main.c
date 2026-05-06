@@ -2309,18 +2309,19 @@ static int simulate_bruteforce_rf(
     const double cutoff_hz =
         5.0 * cfg->symbol_rate_hz; /* Wide enough to avoid ISI, matched filter
                                       provides noise rejection */
+    /* Full-rate downconversion for display parity with old version */
     mix_down_and_lowpass(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                         dec_factor, bb_ref_stream);
+                         1, bb_ref_stream);
     mix_down_and_lowpass(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                         dec_factor, bb_sig_stream);
+                         1, bb_sig_stream);
     }
 
-  /* Step 8: Extract symbol-rate samples - use nbb since we decimate */
+  /* Step 8: Extract symbol-rate samples - use nrf since we're at full rate */
   {
     size_t ref_eval_n = synchronize_and_downsample(
-        bb_ref_stream, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+        bb_ref_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
     size_t sig_eval_n = synchronize_and_downsample(
-        bb_sig_stream, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
+        bb_sig_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
     size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
     (void)eval_n; /* Used only for future diagnostics */
 
@@ -2340,7 +2341,7 @@ static int simulate_bruteforce_rf(
         constellation_count, tx_symbols, sig_sym, sig_eval_n);
     write_complex_trace_stage_artifacts(
         svg_run_dir, "rf", rf_stage_count + 1u, 0, metrics[m].stage,
-        &metrics[m], bb_sig_stream, nbb, fs_hz,
+        &metrics[m], bb_sig_stream, nrf, fs_hz,
         cfg->symbol_rate_hz);
     ++m;
   }
@@ -2361,7 +2362,7 @@ static int simulate_bruteforce_rf(
      */
     if (strstr(stage.name, "LNA 3") || strstr(stage.name, "lna3") ||
         strstr(stage.name, "post_05")) {
-      double p_mean = mean_power_complex(bb_sig_stream, nbb);
+      double p_mean = mean_power_complex(bb_sig_stream, nrf);
       double v_rms = sqrt(p_mean);
       double v_pp_est = v_rms * 2.0 * sqrt(2.0); /* For sinusoids/QAM */
       double target_vpp = 1.0;
@@ -2375,7 +2376,7 @@ static int simulate_bruteforce_rf(
       }
     }
 
-    apply_stage_complex(&stage, bb_ref_stream, bb_sig_stream, nbb, "rf_to_bb",
+    apply_stage_complex(&stage, bb_ref_stream, bb_sig_stream, nrf, "rf_to_bb",
                         N_t0_W, &N_current, &Gain_total, P_sig_in_W);
 
     /*
@@ -2383,9 +2384,9 @@ static int simulate_bruteforce_rf(
      * to compute the metrics and generate the plots.
      */
     size_t ref_eval_n = synchronize_and_downsample(
-        bb_ref_stream, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+        bb_ref_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
     size_t sig_eval_n = synchronize_and_downsample(
-        bb_sig_stream, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
+        bb_sig_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
     size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
 
     /* MATLAB parity: compare against reference that went through same processing */
@@ -2405,19 +2406,9 @@ static int simulate_bruteforce_rf(
         csv_run_dir, svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name,
         &metrics[m], "RF", constellation_template, constellation_count,
         tx_symbols, sig_sym, eval_n);
-/* Use full-rate buffer (nrf) for trace display - matching old behavior.
-     * For speed, only generate full-rate trace for the LAST post-mix stage.
-     * Intermediate stages use decimated rate. */
-    size_t last_post_idx = num_post_stages - 1;
-    if (i == last_post_idx) {
-        write_complex_trace_stage_artifacts(
-            svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
-            bb_sig_stream, nrf, fs_hz, cfg->symbol_rate_hz);
-    } else {
-        write_complex_trace_stage_artifacts(
-            svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
-            bb_sig_stream, nbb, fs_hz, cfg->symbol_rate_hz);
-    }
+    write_complex_trace_stage_artifacts(
+        svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+        bb_sig_stream, nrf, fs_hz, cfg->symbol_rate_hz);
     ++m;
   }
 
