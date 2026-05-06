@@ -2405,10 +2405,19 @@ static int simulate_bruteforce_rf(
         csv_run_dir, svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name,
         &metrics[m], "RF", constellation_template, constellation_count,
         tx_symbols, sig_sym, eval_n);
-/* Use full-rate buffer (nrf) for trace display - matching old behavior */
-    write_complex_trace_stage_artifacts(
-        svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
-        bb_sig_stream, nrf, fs_hz, cfg->symbol_rate_hz);
+/* Use full-rate buffer (nrf) for trace display - matching old behavior.
+     * For speed, only generate full-rate trace for the LAST post-mix stage.
+     * Intermediate stages use decimated rate. */
+    size_t last_post_idx = num_post_stages - 1;
+    if (i == last_post_idx) {
+        write_complex_trace_stage_artifacts(
+            svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+            bb_sig_stream, nrf, fs_hz, cfg->symbol_rate_hz);
+    } else {
+        write_complex_trace_stage_artifacts(
+            svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+            bb_sig_stream, nbb, fs_hz, cfg->symbol_rate_hz);
+    }
     ++m;
   }
 
