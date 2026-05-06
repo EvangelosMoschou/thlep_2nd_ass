@@ -1,6 +1,6 @@
 CC ?= gcc
-CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -Iinclude
-LDFLAGS ?= -lm
+CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -Iinclude -fopenmp
+LDFLAGS ?= -lm -fopenmp
 
 SRC := src/main.c src/prng.c src/stage_models.c src/stage_artifacts.c
 BIN_DIR := bin
@@ -15,7 +15,7 @@ $(BIN_DIR):
 	mkdir -p $(BIN_DIR)
 
 $(OUT_DIR):
-	mkdir -p $(OUT_DIR)/baseband $(OUT_DIR)/rf
+	mkdir -p $(OUT_DIR)/rf
 
 $(BIN): $(SRC) | $(BIN_DIR) $(OUT_DIR)
 	$(CC) $(CFLAGS) $(SRC) -o $(BIN) $(LDFLAGS)
@@ -29,4 +29,4 @@ sweep: $(BIN)
 clean:
 	rm -rf $(BIN_DIR)
 	rm -rf $(OUT_DIR)
-	mkdir -p $(OUT_DIR)/baseband $(OUT_DIR)/rf
+	mkdir -p $(OUT_DIR)/rf

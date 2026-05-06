@@ -18,6 +18,10 @@ typedef struct Complex {
 typedef struct StageMetric {
     const char* stage;        /* Stage name (e.g., "LNA", "Mixer") */
     const char* domain;       /* Signal domain: "complex_baseband", "rf_real", "rf_to_bb" */
+    double gain_db;           /* Stage gain in dB (NaN for derived/input metrics) */
+    double nf_db;             /* Stage noise figure in dB (NaN for derived/input metrics) */
+    int filter_len;           /* Stage moving-average length (0 if not applicable) */
+    int is_limiter;           /* Non-zero if the stage is marked as a limiter */
     double signal_power;      /* Reference signal power (dBm-equivalent linear) */
     double noise_power;       /* Noise power added at this stage */
     double snr_db;            /* Signal-to-Noise Ratio in dB */

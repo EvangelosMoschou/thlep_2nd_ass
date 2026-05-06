@@ -30,8 +30,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 
 NUM_RE = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?")
+RF_STAGE_FILE_RE = re.compile(r"^rf_stage_(\d+)_.*\.csv$")
 
 
+# Map raw catalog names to canonical sweep roles.
 ROLE_FROM_COMPONENT_NAME = {
     "filter 1": "FILTER_1",
     "lna 1": "LNA_1",
@@ -42,19 +44,6 @@ ROLE_FROM_COMPONENT_NAME = {
     "filter 3": "FILTER_3",
     "lna 3": "LNA_3",
     "limiter": "LIMITER",
-}
-
-
-FILTER_LEN_BY_ROLE = {
-    "FILTER_1": 3,
-    "FILTER_2": 5,
-    "FILTER_3": 5,
-    "LNA_1": 1,
-    "LNA_2": 1,
-    "LNA_3": 1,
-    "MIXER_1": 1,
-    "MIXER_2": 1,
-    "LIMITER": 1,
 }
 
 
@@ -85,13 +74,13 @@ class SweepResult:
     quality_score: float
     signal_quality_score: float
     nf_ip3_score: float
-    final_bb_snr_db: float
-    final_bb_evm_pct: float
+    input_rf_snr_db: float
+    input_rf_evm_pct: float
     final_rf_snr_db: float
     final_rf_evm_pct: float
-    effective_bb_gain_db: float
-    estimated_bb_nf_db: float
-    estimated_bb_iip3_dbm: float
+    effective_rf_gain_db: float
+    estimated_rf_nf_db: float
+    estimated_rf_iip3_dbm: float
     selected_uid_chain: str
     selected_part_chain: str
     stage_csv_path: str
@@ -181,7 +170,41 @@ def block_to_role(block_label: str, mixers_seen: int) -> Optional[str]:
     return None
 
 
+def is_filter_block(block_label: str) -> bool:
+    b = normalize_block(block_label)
+    return ("bpf" in b) or ("filter" in b) or (b == "irf")
+
+
+def infer_filter_len_from_topology(roles: Sequence[RoleInstance], role_idx: int) -> int:
+    if role_idx < 0 or role_idx >= len(roles):
+        return 1
+
+    block = normalize_block(roles[role_idx].block_label)
+    if not is_filter_block(block):
+        return 1
+
+    # Topology-driven rule:
+    # - RF preselector BPF keeps short smoothing
+    # - all later filter-like stages use longer smoothing
+    if block == "rf bpf":
+        return 3
+
+    filters_seen = 0
+    for i, role in enumerate(roles):
+        if role.role == "LIMITER":
+            continue
+        if is_filter_block(role.block_label):
+            filters_seen += 1
+        if i == role_idx:
+            break
+
+    if filters_seen <= 1:
+        return 3
+    return 5
+
+
 def load_component_catalog(path: Path, allow_inferred_nf: bool, allow_inferred_ip3: bool) -> Dict[str, List[Component]]:
+    # Build candidate lists grouped by canonical role.
     by_role: Dict[str, List[Component]] = {}
     with path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -232,6 +255,7 @@ def load_component_catalog(path: Path, allow_inferred_nf: bool, allow_inferred_i
 
 
 def load_design_roles(path: Path) -> Dict[int, List[RoleInstance]]:
+    # Convert each block sequence into ordered role instances.
     designs: Dict[int, List[RoleInstance]] = {}
     with path.open("r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -268,10 +292,6 @@ def load_design_roles(path: Path) -> Dict[int, List[RoleInstance]]:
     return designs
 
 
-def role_instance_label(role_inst: RoleInstance) -> str:
-    return f"{role_inst.role}_{role_inst.ordinal}"
-
-
 def slugify_text(text: str) -> str:
     s = (text or "").strip().lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
@@ -286,6 +306,7 @@ def stage_name(chain_prefix: str, idx: int, role_inst: RoleInstance, comp: Compo
 
 
 def split_roles_for_chains(roles: Sequence[RoleInstance]) -> Tuple[List[int], List[int], List[int]]:
+    # Split a linear topology to chain rows expected by stage-model CSVs.
     active_indexes = [i for i, r in enumerate(roles) if r.role != "LIMITER"]
     if not active_indexes:
         return [], [], []
@@ -319,6 +340,7 @@ def write_stage_csv(
 ) -> None:
     selected_by_idx = {idx: comp for idx, comp in enumerate(selected_by_role_index)}
 
+    # Keep all three chains for compatibility with existing sweep artifacts/tools.
     baseband_idxs, rf_front_idxs, rf_post_idxs = split_roles_for_chains(roles)
 
     rows: List[List[object]] = []
@@ -341,7 +363,7 @@ def write_stage_csv(
                     stage_name(chain_prefix, out_idx, role_inst, comp),
                     f"{comp.gain_db:.6f}",
                     f"{comp.nf_db:.6f}",
-                    FILTER_LEN_BY_ROLE.get(role_inst.role, 1),
+                    infer_filter_len_from_topology(roles, role_idx),
                     auto_gain,
                     f"{target_vpp:.1f}",
                     1,
@@ -359,16 +381,75 @@ def write_stage_csv(
         writer.writerows(rows)
 
 
-def parse_metrics_file(path: Path) -> List[Dict[str, str]]:
+def compute_constellation_metric_csv(path: Path) -> Optional[Tuple[float, float, float, float]]:
+    if not path.exists():
+        return None
+
+    signal_sum = 0.0
+    noise_sum = 0.0
+    n = 0
+
     with path.open("r", newline="", encoding="utf-8") as f:
-        return list(csv.DictReader(f))
+        reader = csv.DictReader(f)
+        required = {"ref_i", "ref_q", "sig_i", "sig_q"}
+        if not reader.fieldnames or not required.issubset(set(reader.fieldnames)):
+            return None
+
+        for row in reader:
+            try:
+                ref_i = float(row["ref_i"])
+                ref_q = float(row["ref_q"])
+                sig_i = float(row["sig_i"])
+                sig_q = float(row["sig_q"])
+            except (TypeError, ValueError, KeyError):
+                continue
+
+            signal = ref_i * ref_i + ref_q * ref_q
+            di = sig_i - ref_i
+            dq = sig_q - ref_q
+            noise = di * di + dq * dq
+
+            signal_sum += signal
+            noise_sum += noise
+            n += 1
+
+    if n == 0:
+        return None
+
+    signal_power = signal_sum / float(n)
+    noise_power = noise_sum / float(n)
+
+    if signal_power > 0.0 and noise_power > 0.0:
+        snr_db = 10.0 * math.log10(signal_power / noise_power)
+        evm_pct = math.sqrt(noise_power / signal_power) * 100.0
+    elif signal_power > 0.0 and noise_power == 0.0:
+        snr_db = float("inf")
+        evm_pct = 0.0
+    else:
+        snr_db = float("-inf")
+        evm_pct = float("nan")
+
+    return signal_power, noise_power, snr_db, evm_pct
 
 
-def parse_metric_float(value: str) -> float:
-    v = float(value)
-    if math.isnan(v):
-        return float("nan")
-    return v
+def resolve_rf_input_and_final_stage_csv(csv_dir: Path) -> Tuple[Optional[Path], Optional[Path]]:
+    input_csv = csv_dir / "rf_input.csv"
+    final_stage_csv: Optional[Path] = None
+    final_stage_num = -1
+
+    for path in csv_dir.glob("rf_stage_*.csv"):
+        m = RF_STAGE_FILE_RE.match(path.name)
+        if not m:
+            continue
+        stage_num = int(m.group(1))
+        if stage_num > final_stage_num:
+            final_stage_num = stage_num
+            final_stage_csv = path
+
+    if not input_csv.exists():
+        input_csv = None
+
+    return input_csv, final_stage_csv
 
 
 def safe_db_ratio(num: float, den: float) -> float:
@@ -418,9 +499,9 @@ def estimate_cascaded_iip3_dbm(comps: Sequence[Component]) -> float:
     return 10.0 * math.log10(iip3_total_mw)
 
 
-def quality_score_signal(bb_snr: float, bb_evm: float, rf_snr: float, rf_evm: float) -> float:
+def quality_score_signal(rf_snr: float, rf_evm: float) -> float:
     rf_evm_term = rf_evm if not math.isnan(rf_evm) else 999.0
-    return (bb_snr + rf_snr) - 0.5 * (bb_evm + rf_evm_term)
+    return rf_snr - 0.5 * rf_evm_term
 
 
 def quality_score_nf_ip3(est_nf_db: float, est_iip3_dbm: float, nf_weight: float, ip3_weight: float) -> float:
@@ -459,6 +540,7 @@ def evaluate_combination(
     nf_weight: float,
     ip3_weight: float,
 ) -> Optional[SweepResult]:
+    # Reserve one simulator output slot so parallel workers do not collide on files.
     slot = slot_queue.get()
     try:
         cmd = [
@@ -478,30 +560,27 @@ def evaluate_combination(
         if rc != 0:
             return None
 
+        # Parse RF-only artifacts written by the simulator.
         csv_dir, _ = topology_output_paths(root, slot)
-        bb_metrics = parse_metrics_file(csv_dir / "stage_metrics_baseband.csv")
-        rf_metrics = parse_metrics_file(csv_dir / "stage_metrics_rf.csv")
-        if not bb_metrics or not rf_metrics:
+        input_csv, final_stage_csv = resolve_rf_input_and_final_stage_csv(csv_dir)
+        if not input_csv or not final_stage_csv:
             return None
 
-        bb_first = bb_metrics[0]
-        bb_last = bb_metrics[-1]
-        rf_last = rf_metrics[-1]
+        input_metric = compute_constellation_metric_csv(input_csv)
+        final_metric = compute_constellation_metric_csv(final_stage_csv)
+        if input_metric is None or final_metric is None:
+            return None
 
-        bb_snr = parse_metric_float(bb_last["snr_db"])
-        bb_evm = parse_metric_float(bb_last["evm_pct"])
-        rf_snr = parse_metric_float(rf_last["snr_db"])
-        rf_evm = parse_metric_float(rf_last["evm_pct"])
+        input_sig, _, input_snr, input_evm = input_metric
+        final_sig, _, rf_snr, rf_evm = final_metric
 
-        bb_input_sig = parse_metric_float(bb_first["signal_power"])
-        bb_output_sig = parse_metric_float(bb_last["signal_power"])
-        eff_gain_db = safe_db_ratio(bb_output_sig, bb_input_sig)
+        eff_gain_db = safe_db_ratio(final_sig, input_sig)
 
         selected_active = [selected_by_role_index[i] for i in active_role_indexes]
         selected_active = [c for c in selected_active if c is not None]
         est_nf = estimate_friis_nf_db(selected_active)
         est_iip3 = estimate_cascaded_iip3_dbm(selected_active)
-        signal_score = quality_score_signal(bb_snr, bb_evm, rf_snr, rf_evm)
+        signal_score = quality_score_signal(rf_snr, rf_evm)
         nf_ip3_score = quality_score_nf_ip3(est_nf, est_iip3, nf_weight, ip3_weight)
         score = quality_score_total(objective, signal_score, nf_ip3_score)
 
@@ -514,13 +593,13 @@ def evaluate_combination(
             quality_score=score,
             signal_quality_score=signal_score,
             nf_ip3_score=nf_ip3_score,
-            final_bb_snr_db=bb_snr,
-            final_bb_evm_pct=bb_evm,
+            input_rf_snr_db=input_snr,
+            input_rf_evm_pct=input_evm,
             final_rf_snr_db=rf_snr,
             final_rf_evm_pct=rf_evm,
-            effective_bb_gain_db=eff_gain_db,
-            estimated_bb_nf_db=est_nf,
-            estimated_bb_iip3_dbm=est_iip3,
+            effective_rf_gain_db=eff_gain_db,
+            estimated_rf_nf_db=est_nf,
+            estimated_rf_iip3_dbm=est_iip3,
             selected_uid_chain=uid_chain,
             selected_part_chain=part_chain,
             stage_csv_path=str(stage_csv),
@@ -538,9 +617,10 @@ def run_cmd(cmd: Sequence[str], cwd: Path, quiet: bool = True) -> int:
 
 
 def topology_output_paths(root: Path, topology_sim: int) -> Tuple[Path, Path]:
-    csv_dir = root / "out" / f"topology_sim_{topology_sim}" / "csv"
-    svg_dir = root / "out" / f"topology_sim_{topology_sim}" / "svg"
-    return csv_dir, svg_dir
+    # RF-only runtime writes all artifacts under out/rf.
+    _ = topology_sim
+    rf_dir = root / "out" / "rf"
+    return rf_dir, rf_dir
 
 
 def write_results_csv(path: Path, rows: Sequence[SweepResult]) -> None:
@@ -554,13 +634,13 @@ def write_results_csv(path: Path, rows: Sequence[SweepResult]) -> None:
                 "quality_score",
                 "signal_quality_score",
                 "nf_ip3_score",
-                "final_bb_snr_db",
-                "final_bb_evm_pct",
+                "input_rf_snr_db",
+                "input_rf_evm_pct",
                 "final_rf_snr_db",
                 "final_rf_evm_pct",
-                "effective_bb_gain_db",
-                "estimated_bb_nf_db",
-                "estimated_bb_iip3_dbm",
+                "effective_rf_gain_db",
+                "estimated_rf_nf_db",
+                "estimated_rf_iip3_dbm",
                 "selected_uid_chain",
                 "selected_part_chain",
                 "stage_csv_path",
@@ -574,13 +654,13 @@ def write_results_csv(path: Path, rows: Sequence[SweepResult]) -> None:
                     f"{r.quality_score:.6f}",
                     f"{r.signal_quality_score:.6f}",
                     f"{r.nf_ip3_score:.6f}",
-                    f"{r.final_bb_snr_db:.6f}",
-                    f"{r.final_bb_evm_pct:.6f}",
+                    f"{r.input_rf_snr_db:.6f}",
+                    f"{r.input_rf_evm_pct:.6f}",
                     f"{r.final_rf_snr_db:.6f}",
                     f"{r.final_rf_evm_pct:.6f}",
-                    f"{r.effective_bb_gain_db:.6f}",
-                    f"{r.estimated_bb_nf_db:.6f}",
-                    f"{r.estimated_bb_iip3_dbm:.6f}",
+                    f"{r.effective_rf_gain_db:.6f}",
+                    f"{r.estimated_rf_nf_db:.6f}",
+                    f"{r.estimated_rf_iip3_dbm:.6f}",
                     r.selected_uid_chain,
                     r.selected_part_chain,
                     r.stage_csv_path,
@@ -594,7 +674,7 @@ def summarize_to_markdown(path: Path, best_overall: Sequence[SweepResult], best_
     lines.append("")
     lines.append("## Best Overall")
     lines.append("")
-    lines.append("| Rank | Design | Score | BB SNR | BB EVM | RF SNR | RF EVM | Est. NF | Est. IIP3 |")
+    lines.append("| Rank | Design | Score | Input RF SNR | Input RF EVM | Final RF SNR | Final RF EVM | Est. NF | Est. IIP3 |")
     lines.append("| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |")
     for rank, res in enumerate(best_overall, start=1):
         lines.append(
@@ -602,19 +682,19 @@ def summarize_to_markdown(path: Path, best_overall: Sequence[SweepResult], best_
                 rank,
                 res.design_id,
                 res.quality_score,
-                res.final_bb_snr_db,
-                res.final_bb_evm_pct,
+                res.input_rf_snr_db,
+                res.input_rf_evm_pct,
                 res.final_rf_snr_db,
                 res.final_rf_evm_pct,
-                res.estimated_bb_nf_db,
-                res.estimated_bb_iip3_dbm,
+                res.estimated_rf_nf_db,
+                res.estimated_rf_iip3_dbm,
             )
         )
 
     lines.append("")
     lines.append("## Best Per Design")
     lines.append("")
-    lines.append("| Design | Score | NF/IP3 Score | BB SNR | BB EVM | RF SNR | RF EVM | Est. NF | Est. IIP3 | Selected Components |")
+    lines.append("| Design | Score | NF/IP3 Score | Input RF SNR | Input RF EVM | Final RF SNR | Final RF EVM | Est. NF | Est. IIP3 | Selected Components |")
     lines.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |")
     for design_id in sorted(best_per_design):
         res = best_per_design[design_id]
@@ -623,12 +703,12 @@ def summarize_to_markdown(path: Path, best_overall: Sequence[SweepResult], best_
                 design_id,
                 res.quality_score,
                 res.nf_ip3_score,
-                res.final_bb_snr_db,
-                res.final_bb_evm_pct,
+                res.input_rf_snr_db,
+                res.input_rf_evm_pct,
                 res.final_rf_snr_db,
                 res.final_rf_evm_pct,
-                res.estimated_bb_nf_db,
-                res.estimated_bb_iip3_dbm,
+                res.estimated_rf_nf_db,
+                res.estimated_rf_iip3_dbm,
                 res.selected_uid_chain,
             )
         )
@@ -682,11 +762,14 @@ def main() -> int:
     out_dir = (root / args.out_dir).resolve()
     generated_dir = out_dir / "generated_stage_csv"
     best_dir = out_dir / "best_stage_csv"
-    stage_slot_count = 4
+    stage_slot_count = 1
 
     requested_jobs = args.jobs if args.jobs > 0 else (os.cpu_count() or 1)
-    jobs = min(max(1, requested_jobs), stage_slot_count)
+    jobs = 1
+    if requested_jobs != 1:
+        print("[INFO] RF-only simulator writes to shared out/rf; forcing single-worker execution.")
 
+    # Validate mandatory inputs up front for fast-fail behavior.
     if not catalog_path.exists():
         print(f"[ERROR] Missing catalog: {catalog_path}")
         return 2
@@ -695,6 +778,7 @@ def main() -> int:
         return 2
 
     bin_path = root / "bin" / "dual_receiver_sim"
+    # Build only on demand or when binary is missing.
     if args.build or not bin_path.exists():
         print("[INFO] Building simulator...")
         rc = run_cmd(["make", "clean"], cwd=root, quiet=False)
@@ -724,7 +808,7 @@ def main() -> int:
         return 4
 
     print(f"[INFO] Objective: {args.objective} (nf_weight={args.nf_weight}, ip3_weight={args.ip3_weight})")
-    print(f"[INFO] Parallel workers: {jobs} (stage slots available: {stage_slot_count})")
+    print(f"[INFO] Parallel workers: {jobs} (RF-only mode)")
     print("[INFO] Component options per role:")
     for role in sorted(by_role):
         inferred_count = sum(1 for c in by_role[role] if c.nf_inferred)
@@ -734,6 +818,7 @@ def main() -> int:
     all_results: List[SweepResult] = []
     sweep_start = time.time()
 
+    # Fixed slot pool mirrors the simulator's topology output namespace.
     slot_queue: "queue.Queue[int]" = queue.Queue()
     for slot in range(1, stage_slot_count + 1):
         slot_queue.put(slot)
@@ -799,6 +884,7 @@ def main() -> int:
                     )
                 )
 
+            # Collect futures as they complete to keep progress reporting responsive.
             completed = 0
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
@@ -839,6 +925,7 @@ def main() -> int:
     write_results_csv(out_dir / "sweep_results_top.csv", top_overall)
     summarize_to_markdown(out_dir / "sweep_summary.md", top_overall[: min(10, len(top_overall))], best_per_design)
 
+    # Re-run top candidates at higher symbol count and snapshot produced artifacts.
     best_dir.mkdir(parents=True, exist_ok=True)
     for rank, res in enumerate(top_overall[: max(1, args.rerun_top)], start=1):
         target_csv = best_dir / f"rank_{rank:02d}_design_{res.design_id}_combo_{res.combo_index:05d}.csv"
@@ -855,7 +942,7 @@ def main() -> int:
             "--stage-csv",
             str(target_csv),
             "--topology-sim",
-            str(res.design_id),
+            "1",
         ]
         rc = run_cmd(cmd, cwd=root, quiet=args.quiet)
         if rc != 0:

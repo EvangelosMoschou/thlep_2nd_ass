@@ -1,668 +1,767 @@
-# Receiver Dual Simulation — Complete Explanation
+# receiver_dual_sim - Πληρης Επεξηγηση Κωδικα
 
-## Table of Contents
+## 1. Τι ειναι αυτο το project
 
-1. [What This Program Does](#1-what-this-program-does)
-2. [Background Concepts](#2-background-concepts)
-3. [Project Structure](#3-project-structure)
-4. [Architecture Overview](#4-architecture-overview)
-5. [Signal Flow — End to End](#5-signal-flow--end-to-end)
-6. [File-by-File Breakdown](#6-file-by-file-breakdown)
-7. [Key Data Structures](#7-key-data-structures)
-8. [Key Algorithms Explained](#8-key-algorithms-explained)
-9. [CSV Configuration System](#9-csv-configuration-system)
-10. [Output Files](#10-output-files)
-11. [How to Build and Run](#11-how-to-build-and-run)
-12. [Glossary](#12-glossary)
+Το `receiver_dual_sim` ειναι ενας dual-path προσομοιωτης δεκτη για DVB-S2 64-APSK.
+Μοντελοποιει την ιδια αλυσιδα δεκτη με δυο διαφορετικους τροπους:
 
----
+- **Complex baseband path** (`baseband_rx`): γρηγορη προσεγγιση στο πεδιο συμβολων/μιγαδικου σηματος.
+- **Brute-force RF path** (`rf_frontend` + `rf_postmix_bb`): ρητη RF προσομοιωση κυματομορφης με upconversion και downconversion.
 
-## 1. What This Program Does
+Το project ειναι οργανωμενο ωστε να μπορεις να:
 
-This is a **satellite receiver simulator** written in C. It models how a digital communication signal (specifically **64-APSK**, a modulation scheme used in the **DVB-S2X** satellite TV standard) is degraded as it passes through the stages of a receiver.
+- αλλαζεις σταδια δεκτη απο CSV χωρις recompilation,
+- τρεχεις C simulations και να παραγεις per-stage CSV/SVG artifacts,
+- τρεχεις MATLAB reference μοντελο για constellation-focused validation,
+- κανεις προαιρετικα αυτοματοποιημενα component sweeps απο catalog εξαρτηματων.
 
-In simple terms: imagine you're watching satellite TV. The satellite transmits a signal, and your dish receives it. Between the dish and the screen, the signal passes through amplifiers, filters, and mixers — each of which adds noise and distorts the signal slightly. This program simulates that entire journey and measures exactly how much the signal quality degrades at each step.
 
-### The Two Simulation Modes
+## 2. Δομη repository και ρολος καθε μερους
 
-The simulator runs the **same signal** through **two independent paths**, then compares them:
+- `src/`
+  - Βασικη C μηχανη (`main.c`) και υποστηρικτικα modules (`stage_models.c`, `stage_artifacts.c`, `prng.c`).
+- `include/`
+  - Public headers που μοιραζονται τα C source files.
+- `stage_models/`
+  - Runtime stage-chain CSVs και topology-design CSV που χρησιμοποιει το sweep.
+- `data/`
+  - Component catalog για sweep και MATLAB phase-noise lookup.
+- `matlab/`
+  - MATLAB reference simulation και script δημιουργιας Simulink μοντελου.
+- `scripts/`
+  - Script batch sweep automation (`run_component_sweep.py`).
+- `bin/`
+  - Built executables, κυριως το `dual_receiver_sim`.
+- `out/`
+  - Παραγομενα artifacts απο C και MATLAB runs.
 
-| Path | Name | Speed | Fidelity |
-|------|------|-------|----------|
-| **Path 1** | Complex Baseband | Very fast | Analytical approximation |
-| **Path 2** | Brute-Force RF | Slow | Physically realistic |
 
-- **Complex Baseband**: Processes the signal as abstract I/Q (In-phase/Quadrature) numbers. Think of it as doing the math on paper — fast and accurate, but it doesn't account for real radio effects.
+## 3. End-to-end runtime ροη (C simulator)
 
-- **Brute-Force RF**: Actually creates a simulated 24 GHz radio wave, samples it at 96 GHz, passes it through the receiver stages as if it were a real signal, then converts it back. This captures effects that the baseband model misses (like aliasing or mixer artifacts).
+Το βασικο binary χτιζεται απο:
 
----
+- `src/main.c`
+- `src/prng.c`
+- `src/stage_models.c`
+- `src/stage_artifacts.c`
 
-## 2. Background Concepts
+Στο run-time, η ροη ειναι:
 
-### 2.1 What is 64-APSK?
+1. Parse των CLI arguments (seed, symbols, SNR, stage CSV path κ.λπ.).
+2. Build του DVB-S2 64-APSK constellation και random symbol stream.
+3. Υπολογισμος input budget βασισμενου σε thermal noise.
+4. Κλιμακωση κυματομορφης στο φυσικο input level (περιλαμβανει conversion για 50 ohm).
+5. Φορτωση των stage chains απο canonical CSV.
+6. Εκτελεση complex baseband simulation (`baseband_rx`).
+7. Εκτελεση brute-force RF simulation (`rf_frontend` -> downconvert -> `rf_postmix_bb`).
+8. Εγγραφη per-stage artifacts (constellations/traces σε SVG + CSV).
+9. Εκτυπωση stage metrics summary στο terminal.
 
-**APSK** = Amplitude and Phase Shift Keying. It's a way of encoding digital data into a radio signal.
 
-Each "symbol" the transmitter sends is one of **64 predefined complex numbers** (points on a 2D plane). These 64 points are arranged in **4 concentric rings**:
+## 4. Βασικοι τυποι δεδομενων (`include/sim_types.h`)
 
-```
-Ring 0 (innermost):  radius = 1.00    (4 points per quadrant → 16 total)
-Ring 1:              radius = 1.88    (4 points per quadrant → 16 total)
-Ring 2:              radius = 2.72    (4 points per quadrant → 16 total)
-Ring 3 (outermost):  radius = 3.95    (4 points per quadrant → 16 total)
-```
+- `Complex`
+  - Δυο doubles (`re`, `im`) για I/Q αναπαρασταση.
 
-Since log₂(64) = 6, each symbol carries **6 bits** of information.
+- `StageMetric`
+  - Stage label, domain string, signal power, noise power, SNR (dB), EVM (%).
 
-### 2.2 What is I/Q?
+- `SimConfig`
+  - Carrier, symbol rate, number of symbols, rolloff, input SNR, temperatures, RF sample rate, PRNG seed.
 
-A complex signal has two components:
-- **I (In-phase)**: The "horizontal" part (real component)
-- **Q (Quadrature)**: The "vertical" part (imaginary component)
+### 4.1 Βασικοι υπολογισμοι
 
-Together, they define a point on a 2D plane. The signal can be written as `I + jQ` where `j = √(-1)`.
+Αυτα ειναι τα βασικα μαθηματικα που χρησιμοποιει ο κωδικας σε καθε stage:
 
-### 2.3 What is SNR?
+- **Signal power**
+  - Υπολογιζεται ως ο μεσος ορος του τετραγωνου του σηματος.
+  - Για complex σηματα: `P_signal = mean(|x|^2)`.
+  - Για real σηματα: `P_signal = mean(x^2)`.
 
-**SNR** = Signal-to-Noise Ratio. Measured in **dB (decibels)**.
+- **Noise power**
+  - Υπολογιζεται ως ο μεσος ορος του τετραγωνου της διαφορας μεταξυ received και reference σηματος.
+  - Για complex σηματα: `P_noise = mean(|sig - ref|^2)`.
+  - Για real σηματα: `P_noise = mean((sig - ref)^2)`.
 
-`SNR_dB = 10 × log₁₀(P_signal / P_noise)`
+- **SNR**
+  - `SNR_dB = 10 * log10(P_signal / P_noise)`.
+  - Αν το noise power γινει μηδεν, το SNR θεωρειται `+inf`.
 
-Higher SNR = cleaner signal. For 64-APSK to work reliably, you typically need SNR > 18 dB.
+- **EVM**
+  - `EVM_% = sqrt(P_noise / P_signal) * 100`.
+  - Δηλαδη, δειχνει ποσο μεγαλο ειναι το error σε σχεση με το useful signal.
 
-### 2.4 What is EVM?
+- **Voltage ανα βαθμιδα**
+  - Οταν μια βαθμιδα εχει gain σε dB, το amplitude scale ειναι `10^(gain_db/20)`.
+  - Το power scale αντιστοιχει σε `10^(gain_db/10)`.
+  - Στον κωδικα, το reference και το received signal κλιμακωνονται με το ιδιο voltage gain, ωστε να μενει συνεπης η σχεση σηματος και noise.
+  - Για μετατροπη ισχυος σε voltage σε 50 ohm χρησιμοποιειται το `V_rms = sqrt(P * R)`.
+  - Οταν υπαρχει `auto_gain_to_vpp`, το stage υπολογιζει gain ωστε το I-component peak-to-peak να φτασει στο `target_vpp`.
 
-**EVM** = Error Vector Magnitude. Measured as a **percentage**.
 
-`EVM% = √(P_noise / P_signal) × 100`
-
-It measures how far received symbols deviate from their ideal positions. Lower EVM = better. An EVM of 5% means the average error is 5% of the signal amplitude.
-
-### 2.5 What is Noise Figure (NF)?
-
-Every real hardware component (amplifier, filter, mixer) adds some noise. **Noise Figure** measures how much noise a component adds, in dB.
-
-- NF = 0 dB → Perfect (adds no noise)
-- NF = 3 dB → Doubles the noise power
-- NF = 10 dB → Multiplies noise power by 10
-
-### 2.6 What is AWGN?
-
-**AWGN** = Additive White Gaussian Noise. The standard noise model for communications.
-
-- **Additive**: Noise is added to the signal (not multiplied)
-- **White**: Equal noise power at all frequencies
-- **Gaussian**: Each noise sample follows a bell-curve distribution
-
-### 2.7 What are dB (Decibels)?
-
-A logarithmic scale for expressing ratios:
-
-| dB | Linear Factor | Meaning |
-|----|--------------|---------|
-| +20 dB | ×100 | 100× amplification |
-| +10 dB | ×10 | 10× amplification |
-| +3 dB | ×2 | Doubled |
-| 0 dB | ×1 | No change |
-| -3 dB | ×0.5 | Halved |
-| -10 dB | ×0.1 | 10× attenuation |
-| -20 dB | ×0.01 | 100× attenuation |
-
----
-
-## 3. Project Structure
-
-```
-receiver_dual_sim/
-├── Makefile                 — Build system (compile, run, clean)
-│
-├── include/                 — Header files (type and function declarations)
-│   ├── sim_types.h          — Complex, StageMetric, SimConfig structs
-│   ├── prng.h               — PRNG function declarations
-│   ├── stage_models.h       — Stage configuration types + CSV loader API
-│   └── stage_artifacts.h    — Output writer function declarations
-│
-├── src/                     — Source code (implementation)
-│   ├── main.c               — Main simulation engine (~1600 lines)
-│   ├── prng.c               — Random number generator (~300 lines)
-│   ├── stage_models.c       — CSV parser for stage definitions (~690 lines)
-│   └── stage_artifacts.c    — CSV/SVG output generation (~840 lines)
-│
-├── stage_models/            — Receiver configuration CSV files
-│   ├── stage_models.csv                    — Design reference
-│   └── runtime_stage_models_target16.csv   — Active simulator config
-│
-├── data/                    — Input data (if needed)
-│
-├── out/                     — Simulation output (created at runtime)
-│   ├── topology_sim_1/
-│   │   ├── csv/             — CSV data files
-│   │   └── svg/             — SVG chart images
-│   ├── topology_sim_2/         — (same structure)
-│   ├── topology_sim_3/
-│   ├── topology_sim_4/
-│   └── topology_sim_5/
-│
-└── EXPLANATION.md           — This file
-```
-
----
-
-## 4. Architecture Overview
-
-```
-┌─────────────────────────────────────────────────────────────────────┐
-│                           MAIN.C                                    │
-│                                                                     │
-│  ┌──────────┐   ┌──────────────┐   ┌──────────────────────────┐    │
-│  │ CLI Parse │→ │ Build 64-APSK │→ │ Generate Random Symbols   │    │
-│  │  --snr    │   │ Constellation │   │ (256 symbols by default) │    │
-│  │  --seed   │   └──────────────┘   └──────────────────────────┘    │
-│  │  --stage  │                              │                       │
-│  └──────────┘                              ▼                       │
-│                                 ┌──────────────────────┐           │
-│                                 │ Calculate Link Budget │           │
-│                                 │ P_noise = kTB         │           │
-│                                 └──────────┬───────────┘           │
-│                                            │                       │
-│                             ┌──────────────┼──────────────┐        │
-│                             ▼              ▼              │        │
-│                 ┌───────────────┐  ┌────────────────┐     │        │
-│                 │  Path 1:      │  │ Path 2:        │     │        │
-│                 │  Complex      │  │ Brute-Force    │     │        │
-│                 │  Baseband     │  │ RF             │     │        │
-│                 │               │  │                │     │        │
-│                 │ Add AWGN →    │  │ Upsample →     │     │        │
-│                 │ Stage chain → │  │ Modulate →     │     │        │
-│                 │ Measure SNR   │  │ Add AWGN →     │     │        │
-│                 │               │  │ RF stages →    │     │        │
-│                 │               │  │ Downconvert →  │     │        │
-│                 │               │  │ BB stages →    │     │        │
-│                 │               │  │ Measure SNR    │     │        │
-│                 └──────┬────────┘  └───────┬────────┘     │        │
-│                        │                   │              │        │
-│                        ▼                   ▼              │        │
-│                 ┌──────────────────────────────────┐      │        │
-│                 │        Write Outputs             │      │        │
-│                 │  CSV data + SVG visualizations   │      │        │
-│                 │  Console summary table            │      │        │
-│                 └──────────────────────────────────┘      │        │
-└─────────────────────────────────────────────────────────────────────┘
-
-External modules:
-┌──────────┐  ┌───────────────┐  ┌──────────────────┐
-│ PRNG.C   │  │ STAGE_MODELS.C│  │ STAGE_ARTIFACTS.C│
-│          │  │               │  │                  │
-│ Seed →   │  │ CSV file →    │  │ Data arrays →    │
-│ Uniform  │  │ Parse header  │  │ CSV files        │
-│ Gaussian │  │ Parse rows    │  │ SVG charts       │
-│ uint32   │  │ Build chains  │  │ Metric tables    │
-└──────────┘  └───────────────┘  └──────────────────┘
-```
-
-### The Three Receiver Chains
-
-The CSV file defines three separate chains of stages:
-
-| Chain | ID | Purpose |
-|-------|----|---------|
-| `baseband_rx` | 0 | Fast analytical path (I/Q processing only) |
-| `rf_frontend` | 1 | RF stages before downconversion (real signal) |
-| `rf_postmix_bb` | 2 | Baseband stages after downconversion (complex I/Q) |
-
-**Path 1** uses only `baseband_rx`.  
-**Path 2** uses `rf_frontend` → mixer → `rf_postmix_bb`.
-
----
-
-## 5. Signal Flow — End to End
-
-### Phase 1: Transmitter (common to both paths)
-
-```
-1. Build 64-APSK constellation (64 fixed I/Q points, normalized to Es=1)
-2. Randomly pick 256 symbols from the constellation (using PRNG)
-3. Record the transmitted sequence as both "reference" (clean) and "signal" (will degrade)
-```
-
-### Phase 2a: Complex Baseband Path
-
-```
-4. Add AWGN to the "signal" copy at the configured SNR level
-5. For each stage in baseband_rx chain:
-   a. Apply moving-average filter (if filter_len > 1)
-   b. Apply gain (amplify or attenuate)
-   c. Inject stage noise (based on Noise Figure)
-   d. Measure SNR & EVM
-   e. Write CSV data + SVG constellation plot
-```
-
-### Phase 2b: Brute-Force RF Path
-
-```
-4. Upsample: repeat each symbol SPS times (rectangular pulses)
-5. IQ modulate onto 24 GHz carrier:
-   RF[t] = I[t]·cos(2πf_c·t) − Q[t]·sin(2πf_c·t)
-6. Add AWGN to the RF waveform
-7. For each stage in rf_frontend chain:
-   a. Filter → Gain → Noise (same as baseband, but real signal)
-8. Downconvert RF → baseband:
-   I_raw = 2·RF·cos(2πf_c·t)    Q_raw = −2·RF·sin(2πf_c·t)
-   Apply low-pass filter to remove 2×f_c image
-9. Downsample: pick center sample of each symbol period
-10. For each stage in rf_postmix_bb chain:
-    a. Filter → Gain → Noise (complex I/Q signal)
-```
-
-### Phase 3: Output
-
-```
-11. Write stage metrics CSV and SVG for both paths
-12. Print console summary with SNR/EVM at each stage
-```
-
----
-
-## 6. File-by-File Breakdown
-
-### 6.1 `src/main.c` — The Simulation Engine
-
-This is the largest file (~1600 lines) and the heart of the simulator. It contains:
-
-| Function | Purpose |
-|----------|---------|
-| `main()` | Entry point — CLI parsing, orchestration, cleanup |
-| `build_64apsk_constellation_dvbs2x()` | Construct the 64-APSK constellation from DVB-S2X spec |
-| `normalize_constellation()` | Scale constellation to unit average power |
-| `generate_symbols()` | Randomly select transmitted symbols |
-| `add_awgn_complex()` / `add_awgn_real()` | Inject Gaussian noise |
-| `apply_stage_complex()` / `apply_stage_real()` | Process signal through one stage (filter → gain → noise) |
-| `simulate_complex_baseband()` | Run the fast analytical simulation |
-| `simulate_bruteforce_rf()` | Run the full RF simulation |
-| `env_to_rf_real()` | IQ upconversion to RF carrier |
-| `mix_down_and_lowpass()` | RF downconversion with anti-aliasing filter |
-| `moving_average_complex()` / `_real()` | Rectangular FIR low-pass filter |
-| `compute_metric_complex()` / `_real()` | Calculate SNR and EVM |
-| `db_to_lin()` / `lin_to_db()` | Unit conversion helpers |
-
-### 6.2 `src/prng.c` — Random Number Generator
-
-Implements the **xoshiro256\*\*** PRNG algorithm:
-
-| Function | Purpose |
-|----------|---------|
-| `prng_seed(uint32_t)` | Initialize with a 32-bit seed (uses SplitMix64 to expand) |
-| `prng_uniform()` | Random double in [0, 1) |
-| `prng_gauss()` | Standard normal N(0,1) via Box-Muller transform |
-| `prng_uint32()` | Random 32-bit unsigned integer |
-
-**Why xoshiro256\*\*?**
-- Extremely fast (~10 CPU cycles per number)
-- Excellent statistical quality (passes BigCrush, PractRand)
-- Long period: 2²⁵⁶ − 1 states before repeating
-- Deterministic: same seed → same sequence every time
-
-### 6.3 `src/stage_models.c` — CSV Configuration Loader
-
-Reads receiver stage definitions from CSV files:
-
-| Function | Purpose |
-|----------|---------|
-| `stage_models_load_csv()` | Main entry: open file, detect format, parse, validate |
-| `stage_models_free()` | Free all allocated memory |
-| `stage_models_get()` | Retrieve stage array for a given chain |
-| `stage_chain_name()` | Convert chain ID to string name |
-| `parse_chain_id()` | Flexible chain name matching |
-| `map_legacy_component()` | Backward-compatible mapping for old CSV format |
-
-**CSV format auto-detection:** The loader checks the header row for a "chain" column. If present → canonical format. If absent → legacy format (maps component names like "LNA 1" to the appropriate chain and stage).
-
-### 6.4 `src/stage_artifacts.c` — Output Generation
-
-Generates all CSV data files and SVG visualizations:
-
-| Function | Purpose |
-|----------|---------|
-| `write_constellation_csv()` | Save I/Q coordinates to CSV |
-| `write_constellation_svg()` | Draw scatter plot of I/Q constellation |
-| `write_real_trace_csv()` | Save time-domain RF waveform to CSV |
-| `write_trace_svg()` | Draw time-domain waveform overlay |
-| `write_metrics_csv()` / `_svg()` | Stage metrics summary table |
-| `write_input_budget_csv()` / `write_budget_svg()` | Link budget parameter card |
-| `humanize_stage_name()` | Convert "rf_bpf_eq" → "RF BPF EQ" |
-| `slugify_text()` | Convert "RF BPF EQ" → "rf_bpf_eq" (filesystem-safe) |
-
----
-
-## 7. Key Data Structures
-
-### `Complex` (sim_types.h)
-
-```c
-typedef struct { double re, im; } Complex;
-```
-Represents a complex number with real (In-phase) and imaginary (Quadrature) parts.
-
-### `SimConfig` (sim_types.h)
-
-```c
-typedef struct {
-    double carrier_hz;         // RF carrier frequency (default: 24 GHz)
-    double symbol_rate_hz;     // Symbol rate (default: 10 Msym/s)
-    double rolloff;            // Root-raised-cosine roll-off (default: 0.2)
-    double input_snr_db;       // Input SNR in dB (default: 20)
-    double antenna_temp_k;     // Antenna temperature in Kelvin (default: 150 K)
-    double t0_k;               // Reference temperature (always 290 K)
-    double rf_sample_rate_hz;  // RF sampling rate (default: 96 GHz)
-    int symbols;               // Number of symbols to simulate (default: 256)
-    unsigned int seed;         // PRNG seed (default: current time)
-} SimConfig;
-```
-
-### `StageModel` (stage_models.h)
-
-```c
-typedef struct {
-    char* name;               // Human-readable name (e.g., "lna", "rf_bpf")
-    double gain_db;           // Gain in dB (+25 = amplify, -3 = attenuate)
-    double nf_db;             // Noise Figure in dB (higher = noisier)
-    int filter_len;           // Moving-average filter window (1 = no filter)
-    int auto_gain_to_vpp;     // If 1, calculate gain to target Vpp automatically
-    double target_vpp;        // Target peak-to-peak voltage
-} StageModel;
-```
-
-### `StageMetric` (sim_types.h)
-
-```c
-typedef struct {
-    const char* stage;        // Stage name
-    const char* domain;       // Signal domain (e.g., "complex_baseband")
-    double signal_power;      // Mean signal power
-    double noise_power;       // Mean noise power (MSE vs. reference)
-    double snr_db;            // Signal-to-Noise Ratio in dB
-    double evm_pct;           // Error Vector Magnitude in %
-} StageMetric;
-```
-
-### `StageModelsConfig` (stage_models.h)
-
-```c
-typedef struct {
-    StageModel* chains[3];    // Three arrays of stages (one per chain)
-    size_t counts[3];         // Number of stages in each chain
-} StageModelsConfig;
-```
-
----
-
-## 8. Key Algorithms Explained
-
-### 8.1 DVB-S2X 64-APSK Constellation Construction
-
-Each of the 64 symbols is identified by a 6-bit label. The bits are decoded as:
-
-```
-Bit layout: [a, b, p, q, u, v]
-
-Bits [5:4] = ab → Ring selection via Gray-code LUT
-                   ab=00→Ring0, ab=01→Ring1, ab=11→Ring3, ab=10→Ring2
-
-Bit [3] = q  ┐
-Bit [2] = p  ┘→ Quadrant selection (4 quadrants via p,q combinations)
-
-Bits [1:0] = uv → Phase position via Gray-code LUT
-                   uv=00→1, uv=01→3, uv=11→7, uv=10→5
-
-Phase angle = phi_number × π/16 (in first quadrant)
-Full angle  = dvbs2x_quadrant_angle(phi, p, q)
-I = radius × cos(angle)
-Q = radius × sin(angle)
-```
-
-After construction, the constellation is **normalized** so that the average symbol energy `Es = 1`.
-
-### 8.2 Friis Noise Cascade Model (T0 Reference Tracker)
-
-The `pn_t0_track` variable tracks the reference noise power as it propagates through stages. This models the **Friis noise temperature formula**:
-
-```
-F_total = F₁ + (F₂ - 1)/G₁ + (F₃ - 1)/(G₁·G₂) + ...
-```
-
-Where `F_i` is the noise factor and `G_i` is the gain of stage `i`. The tracker ensures that noise added by later stages is appropriately scaled by the cumulative gain of all preceding stages.
-
-### 8.3 Box-Muller Transform (Gaussian Noise Generation)
-
-The `prng_gauss()` function uses the **Box-Muller transform** to convert two uniform random numbers into two independent Gaussian samples:
-
-```
-u₁, u₂ ~ Uniform(0, 1)
-magnitude = √(-2 · ln(u₁))
-angle = 2π · u₂
-sample₁ = magnitude · cos(angle)    → returned immediately
-sample₂ = magnitude · sin(angle)    → cached for next call
-```
-
-### 8.4 IQ Modulation / Demodulation
-
-**Upconversion** (baseband → RF):
-```
-RF[t] = I[t] · cos(2πf_c·t) − Q[t] · sin(2πf_c·t)
-```
-
-**Downconversion** (RF → baseband):
-```
-I_raw = 2 · RF · cos(2πf_c·t)    // Multiply by cosine
-Q_raw = −2 · RF · sin(2πf_c·t)   // Multiply by −sine
-                                   // Factor of 2 compensates for half-power loss
-Low-pass filter I_raw and Q_raw to remove 2×f_c image
-```
-
-Both use a **Numerically Controlled Oscillator (NCO)** instead of computing `cos()` and `sin()` for every sample. The NCO multiplies by a fixed rotation phasor each step, which is much faster.
-
-### 8.5 Moving Average Filter
-
-A simple but effective rectangular low-pass filter:
-
-```
-output[i] = (1/W) × Σ input[i-W+1 ... i]
-```
-
-Implemented efficiently with a running sum (O(n) total, not O(n×W)):
-- Add `input[i]` to the running sum
-- If window is full, subtract `input[i-W]`
-- Output = running_sum / window_count
-
----
-
-## 9. CSV Configuration System
-
-### Canonical Format (Recommended)
-
-```csv
-chain, name, gain_db, nf_db, filter_len, auto_gain_to_vpp, target_vpp, enabled
-baseband_rx, rf_bpf_eq, -2.5, 2.5, 3, 0, 0.0, 1
-baseband_rx, lna, 25.0, 1.2, 1, 0, 0.0, 1
-baseband_rx, mixer_downconv, -7.0, 8.0, 1, 0, 0.0, 1
-baseband_rx, bb_lpf, -1.5, 1.5, 5, 0, 0.0, 1
-baseband_rx, bb_amp_1vpp, 0.0, 3.0, 1, 1, 1.0, 1
-rf_frontend, rf_bpf, -2.5, 2.5, 5, 0, 0.0, 1
-rf_frontend, lna, 25.0, 1.2, 1, 0, 0.0, 1
-rf_postmix_bb, bb_lpf, -1.5, 1.5, 5, 0, 0.0, 1
-rf_postmix_bb, bb_amp_1vpp, 0.0, 3.0, 1, 1, 1.0, 1
-```
-
-### Legacy Format (Backward-Compatible)
-
-```csv
-component, gain_db, nf_db
-Filter 1, -2.5, 2.5
-LNA 1, 25.0, 1.2
-Mixer 1, -7.0, 8.0
-Filter 2, -1.5, 1.5
-LNA 2, 15.0, 3.0
-```
-
-Legacy component names are automatically mapped to canonical chains via hard-coded rules in `map_legacy_component()`.
-
-### Column Name Flexibility
-
-Headers are normalized (case-insensitive, punctuation-stripped), so all of these are equivalent:
-- `gain_db`, `Gain_dB`, `GAIN-DB`, `Gain(dB)`, `gaindb`
-
----
-
-## 10. Output Files
-
-### 10.1 Directory Layout
-
-```
-out/topology_sim_1/
-├── csv/
-│   ├── input_budget.csv                              — Simulation parameters
-│   ├── baseband_input.csv                            — Baseband input constellation
-│   ├── baseband_stage_01_rf_bpf_eq.csv              — After RF BPF EQ stage
-│   ├── baseband_stage_02_lna.csv                     — After LNA stage
-│   ├── ...                                           — (one per stage)
-│   ├── rf_input.csv                                  — RF input waveform
-│   ├── rf_stage_01_rf_bpf.csv                       — After RF BPF stage
-│   ├── ...
-│   ├── stage_metrics_baseband.csv                    — All baseband stage metrics
-│   └── stage_metrics_rf.csv                          — All RF stage metrics
-│
-└── svg/
-    ├── input_budget.svg                              — Link budget card
-    ├── baseband_input_snr_20p00db_evm_9p50pct.svg   — Input constellation plot
-    ├── baseband_stage_01_rf_bpf_eq_snr_19p85db_....svg
-    ├── ...
-    ├── rf_input_snr_20p00db.svg                     — RF waveform plot
-    ├── rf_stage_01_rf_bpf_snr_19p85db.svg
-    ├── ...
-    ├── stage_metrics_baseband.svg                    — Metrics summary table
-    └── stage_metrics_rf.svg
-```
-
-### 10.2 CSV File Formats
-
-**Constellation CSV** — I/Q coordinates:
-```csv
-idx,ref_i,ref_q,sig_i,sig_q
-0,0.707106781187,0.707106781187,0.715234521983,0.698765432101
-```
-
-**Trace CSV** — Time-domain waveform:
-```csv
-idx,ref,sig
-0,0.234567890123,0.239876543210
-```
-
-**Metrics CSV** — Per-stage quality summary:
-```csv
-stage,domain,signal_power,noise_power,snr_db,evm_pct
-input,complex_baseband,1.000000e+00,1.234567e-02,19.085,11.11
-```
-
-### 10.3 SVG Visualizations
-
-All SVGs are self-contained vector graphics viewable in any web browser:
-- **Constellation plots**: 980×760 px scatter plots with blue (reference) and orange (received) dots
-- **Trace plots**: 1100×600 px line charts with blue (reference) and orange (received) waveforms
-- **Metrics tables**: Formatted data tables with alternating row colors
-- **Budget cards**: Parameter summary cards
-
----
-
-## 11. How to Build and Run
-
-### Prerequisites
-
-- GCC or any C11-compatible compiler
-- Standard C math library (`-lm`)
-- No external dependencies
-
-### Build
+## 5. Stage model API (`include/stage_models.h` + `src/stage_models.c`)
+
+### 5.1 Μοντελο stage και chain
+
+- `StageModel`
+  - `name`, `gain_db`, `nf_db`, `filter_len`, `auto_gain_to_vpp`, `target_vpp`.
+- `StageChainId`
+  - `STAGE_CHAIN_BASEBAND_RX`
+  - `STAGE_CHAIN_RF_FRONTEND`
+  - `STAGE_CHAIN_RF_POSTMIX_BB`
+- `StageModelsConfig`
+  - Περιεχει arrays και για τα 3 chains.
+
+### 5.2 Συμπεριφορα loader
+
+`stage_models_load_csv()`:
+
+- Κανει auto-detect το schema απο το header:
+  - **Canonical**: περιλαμβανει `chain` column.
+  - **Legacy**: δεν εχει `chain`, χρησιμοποιει component-name mapping.
+- Κανει parse required fields (`name/component`, `gain`, `nf`) και optional fields (`filter_len`, `auto_gain_to_vpp`, `target_vpp`, `enabled`).
+- Υποστηριζει ευελικτη ονομασια header με normalization.
+- Παραλειπει disabled rows (`enabled=0`).
+- Ελεγχει οτι και τα 3 chains εχουν πληθυσμο.
+- Χρησιμοποιει atomic update semantics: αντικαθιστα το output config μονο μετα απο επιτυχημενο full parse.
+
+### 5.3 Legacy mapping
+
+Το `map_legacy_component()` χαρτογραφει παλια ονοματα οπως `Filter 1`, `LNA 1`, `Mixer 1` κ.λπ. σε canonical chain entries.
+
+### 5.4 Ιδιοκτησια μνημης
+
+- Τα stage names δεσμευονται στο heap.
+- Το `stage_models_free()` απελευθερωνει ολα τα chain arrays και names.
+- Το `stage_models_get()` επιστρεφει εσωτερικους pointers (δεν γινεται free εξωτερικα).
+
+
+## 6. Artifact API (`include/stage_artifacts.h` + `src/stage_artifacts.c`)
+
+Αυτο το module χειριζεται formatting και παραγωγη αρχειων.
+
+### 6.1 Naming και labels
+
+- `humanize_stage_name()` μετατρεπει εσωτερικα stage names σε αναγνωσιμα labels.
+- `slugify_text()` δημιουργει file-safe slugs.
+- Τα metric tags ενσωματωνονται στα filenames οπου χρειαζεται.
+
+### 6.2 CSV writers
+
+- `write_constellation_csv()`
+  - Αποθηκευει `idx, ref_i, ref_q, sig_i, sig_q`.
+- `write_real_trace_csv()`
+  - Αποθηκευει `idx, ref, sig`, με προαιρετικο truncation σε `max_points`.
+- `write_metrics_csv()`
+  - Γραφει stage metric tables.
+- `write_input_budget_csv()`
+  - Γραφει run-level budget παραμετρους.
+
+### 6.3 SVG writers
+
+- `write_constellation_svg()`
+  - Dots/clouds constellation rendering με fixed MATLAB-like axis range `[-2, 2] x [-2, 2]`.
+- `write_trace_svg()`
+  - Real-signal trace plot με adaptive time window και interpolation sampling.
+- `write_complex_trace_svg()`
+  - I/Q trace plotting για complex streams, με δυνατοτητα overlay του προηγουμενου stage.
+- `write_metrics_svg()`, `write_budget_svg()`
+  - Συνοπτικα table/card style outputs.
+
+### 6.4 Composite high-level calls που χρησιμοποιει το main
+
+- `write_constellation_stage_artifacts()`
+  - Χτιζει names και γραφει per-stage constellation CSV+SVG.
+- `write_trace_stage_artifacts()`
+  - Γραφει per-stage real trace CSV+SVG.
+- `write_complex_trace_stage_artifacts()`
+  - Γραφει complex I/Q trace SVG για postmix/baseband style signals.
+
+### 6.5 Mermaid architecture export
+
+- Το `write_chain_architecture_mermaid()` υπαρχει και μπορει να παραγει Mermaid διαγραμμα απο τα φορτωμενα stage chains.
+
+### 6.6 Σημειωση για API που προς το παρον δεν χρησιμοποιειται
+
+Οι συναρτησεις `write_metrics_csv()`, `write_metrics_svg()`, `write_input_budget_csv()`, `write_budget_svg()` και `write_chain_architecture_mermaid()` υπαρχουν και ειναι λειτουργικες, αλλα δεν καλουνται αυτη τη στιγμη απο το `main.c`.
+
+
+## 7. PRNG module (`include/prng.h` + `src/prng.c`)
+
+### 7.1 Πυρηνας generator
+
+- Χρησιμοποιει **xoshiro256** με 256-bit state.
+- Το seed expansion γινεται με **SplitMix64**.
+
+### 7.2 Public functions
+
+- `prng_seed(uint32_t seed)`
+- `prng_uniform()` -> uniform `[0, 1)` double
+- `prng_gauss()` -> standard normal, Box-Muller με cached spare sample
+- `prng_uint32()` -> random 32-bit integer
+
+### 7.3 Σχεδιαστικος σκοπος
+
+- Deterministic reproducibility για symbol generation και AWGN.
+- Single global state (οχι thread-safe by design για αυτο το project).
+
+
+## 8. Εσωτερικα του βασικου simulator (`src/main.c`)
+
+Το `main.c` περιεχει το orchestration και πολλες signal-processing βοηθητικες συναρτησεις.
+
+### 8.1 Σημαντικες σταθερες
+
+- `K_BOLTZMANN` για thermal noise.
+- `SYSTEM_IMPEDANCE_OHM = 50.0` για power-voltage conversion.
+- `OUTPUT_ROOT_DIR = "out"`.
+- `MAX_METRICS = 32` χωρητικοτητα stage metrics ανα path.
+
+### 8.2 Ομαδες βοηθητικων
+
+- Filesystem/output housekeeping:
+  - `ensure_dir_exists`, `ensure_output_dirs`, `clear_directory_contents`.
+- Numeric helpers:
+  - `db_to_lin`, `lin_to_db`.
+- Constellation generation:
+  - `dvbs2x_quadrant_angle`, `build_64apsk_constellation_dvbs2`, `normalize_constellation`.
+- Signal primitives:
+  - copy/scale functions, moving-average filters, BPF-like real filtering.
+- Noise και metrics:
+  - `add_awgn_complex`, `add_awgn_real`, `compute_metric_complex`, `compute_metric_real`.
+
+### 8.3 MATLAB parity tracker
+
+Το `MatlabParityMetricTracker` παρεχει MATLAB-aligned metric recursion:
+
+- διατηρει cumulative gain/noise,
+- ενημερωνει SNR/EVM ανα stage,
+- εφαρμοζει matched-filter gain assumption στη μετατροπη EVM.
+
+Χρησιμοποιειται για reported parity-style metrics, ενω τα trace plots μενουν βασισμενα στο raw φυσικο σημα.
+
+### 8.4 Συμπεριφορα limiter
+
+- Υπαρχουν soft-limiter helpers (`soft_limiter_envelope`, `apply_soft_limiter_*`).
+- Ο limiter εφαρμοζεται μονο αν το stage name περιεχει `"limiter"`.
+- Αν το τελικο stage λεγεται `rlm43_5w` (οπως στο τρεχον CSV), το limiter block δεν ενεργοποιειται, αρα η συμπεριφορα ειναι linear.
+
+### 8.5 Λογικη εφαρμογης stage
+
+- Τα `apply_stage_complex()` και `apply_stage_real()` υλοποιουν ανα stage:
+  1. προαιρετικο filter,
+  2. gain,
+  3. NF-based local noise injection.
+
+Ο χειρισμος noise χρησιμοποιει T0-referenced tracker, ωστε η προσθεση stage noise να ακολουθει Friis-like behavior.
+
+### 8.6 RF conversion και synchronization
+
+- `env_to_rf_real()`:
+  - IQ upconversion σε real RF με oscillator recursion.
+- `mix_down_and_lowpass()`:
+  - RF downconversion πισω σε complex baseband.
+- `synchronize_and_downsample()`:
+  - timing offset scan + phase alignment + scale fit πριν την εξαγωγη συμβολων.
+
+### 8.7 Βασικες μηχανες προσομοιωσης
+
+- `simulate_complex_baseband()`:
+  - Τρεχει το `baseband_rx` απευθειας σε complex symbols.
+  - Εξαγει per-stage constellation και complex traces.
+
+- `simulate_bruteforce_rf()`:
+  - Κανει upsample, upconvert σε RF, προσθηκη RF noise και εφαρμογη RF stages.
+  - Κανει downconvert και επεξεργασια postmix baseband stages σε oversampled streams.
+  - Εξαγει RF traces και per-stage constellations.
+
+### 8.8 CLI surface
+
+Υποστηριζονται τα options:
+
+- `--seed`
+- `--symbols`
+- `--symbol-rate`
+- `--rf-fs`
+- `--carrier`
+- `--snr`
+- `--stage-csv`
+- `--topology-sim` / `--stage-sim` (legacy compatibility)
+
+Default stage CSV:
+
+- `stage_models/runtime_stage_models_target16.csv`
+
+
+## 9. Stage CSV αρχεια (`stage_models/`)
+
+### 9.1 Ενεργο runtime αρχειο
+
+- `stage_models/runtime_stage_models_target16.csv`
+
+Canonical στηλες:
+
+- `chain`
+- `name`
+- `gain_db`
+- `nf_db`
+- `filter_len`
+- `auto_gain_to_vpp`
+- `target_vpp`
+- `enabled`
+
+Το τρεχον active profile περιλαμβανει:
+
+- πολυ-σταδιακη baseband αλυσιδα,
+- RF frontend chain,
+- RF postmix chain,
+- τελικο linear stage `rlm43_5w` με περιπου `-0.04 dB` gain και `0.04 dB` NF,
+- ενεργο auto-gain στα LNA3 stages με `target_vpp = 1.6` ωστε μετα το linear τελικο stage να φτανει κοντα σε 1 Vpp.
+
+### 9.2 Topology-design αρχειο
+
+- `stage_models/stage_models.csv`
+
+Αυτο ειναι design/topology περιγραφη που χρησιμοποιει το sweep script για να δημιουργει canonical runtime chain CSV υποψηφιους.
+
+
+## 10. Component catalog (`data/component_catalog.csv`)
+
+Περιεχει υποψηφια devices και χαρακτηριστικα οπως:
+
+- στοιχεια ταυτοτητας (`component_uid`, `component_name`, `part_number`),
+- gain/loss,
+- NF,
+- phase noise,
+- πεδια σχετικα με P1dB και IP3.
+
+Χρησιμοποιειται απο:
+
+- `scripts/run_component_sweep.py` για combinatorial search,
+- το MATLAB script για mixer LO phase-noise lookup.
+
+
+## 11. MATLAB reference μοντελο (`matlab/sim_receiver_matlab.m`)
+
+Αυτο το script δινει symbol-domain validation και plotting με CascadeAnalyzer-style assumptions.
+
+### 11.1 Τι κανει
+
+1. Οριζει simulation και link-budget σταθερες.
+2. Χτιζει και κανει normalize το DVB-S2X 64-APSK constellation.
+3. Δημιουργει pulse-shaped transmit waveform με ρητη RRC κατασκευη.
+4. Επιβαλλει το ζητουμενο input level (προς το παρον 50 uV RMS σε 50 ohm).
+5. Τρεχει stage-by-stage το chain model, συμπεριλαμβανοντας:
+   - gain/NF noise additions,
+   - προαιρετικο phase-noise injection απο catalog,
+   - nonlinearity terms (IP3/P1dB) οπου υπαρχουν,
+   - LNA3 steering για final linear RLM output target.
+6. Υπολογιζει ανα stage SNR/EVM και waveform voltage στατιστικα.
+7. Εξαγει:
+   - key-stage constellation plots,
+   - all-stage constellation plots,
+   - C-like per-stage I/Q trace figures.
+
+### 11.2 Helper functions στο τελος του αρχειου
+
+- `export_figure_png_svg(...)`
+- `measure_i_vpp(...)`
+- `plot_trace_like_c(...)`
+
+
+## 12. Simulink builder (`matlab/build_simulink_model.m`)
+
+Δημιουργει προγραμματιστικα το `DVB_S2X_64APSK_Receiver_Sim.slx` με σταδιακη RF -> IF -> BB αλυσιδα blocks και τις διασυνδεσεις.
+
+Σκοπος:
+
+- reproducible δημιουργια Simulink topology,
+- ευθυγραμμιση της block-level ροης με τη C αρχιτεκτονικη του δεκτη.
+
+
+## 13. Sweep automation (`scripts/run_component_sweep.py`)
+
+Αυτο το script εκτελει design-space exploration σε συνδυασμους εξαρτηματων.
+
+### 13.1 Κυρια βηματα
+
+1. Φορτωνει component επιλογες ανα role απο `data/component_catalog.csv`.
+2. Φορτωνει design topologies απο `stage_models/stage_models.csv`.
+3. Χτιζει Cartesian combinations ανα design.
+4. Δημιουργει canonical stage CSV ανα combination.
+5. Τρεχει το simulator και συλλεγει quality metrics.
+6. Κανει ranking και export των top candidates.
+7. Προαιρετικα ξανατρεχει τα top candidates με μεγαλυτερο symbol count.
+
+### 13.2 Scoring
+
+Υλοποιει:
+
+- signal quality score (βασισμενο σε SNR/EVM),
+- NF/IP3 score (Friis NF + cascaded IIP3 estimate),
+- objective επιλογη: `hybrid`, `snr-evm`, `nf-ip3`.
+
+### 13.3 Παραλληλισμος
+
+- Χρησιμοποιει thread pool και slot queue (`topology_sim` slots) για να αποφευγονται συγκρουσεις.
+
+### 13.4 Πρακτικη σημειωση συμβατοτητας
+
+Το script αναμενει old-style outputs του simulator (`out/topology_sim_*/csv/stage_metrics_*.csv`).
+Το τρεχον `main.c` γραφει per-stage artifacts σε `out/baseband` και `out/rf` και δεν παραγει by-default αυτα τα παλια summary CSV paths.
+Αρα, για αξιοπιστη χρηση του sweep, ειτε:
+
+- προσαρμοζεις το script στο τρεχον output contract, ειτε
+- επαναφερεις στο C το legacy output layout/summary files.
+
+
+## 14. Build και run (`Makefile`)
+
+Targets:
+
+- `make` / `make all`
+  - Χτιζει το `bin/dual_receiver_sim`.
+- `make run`
+  - Τρεχει το binary με default ρυθμισεις.
+- `make sweep`
+  - Τρεχει το Python sweep script.
+- `make clean`
+  - Σβηνει το `bin/` και ξαναδημιουργει τους βασικους output φακελους.
+
+
+## 15. Output artifacts (τρεχουσα συμπεριφορα)
+
+### 15.1 C output
+
+- `out/baseband/`
+  - per-stage constellation CSV/SVG,
+  - per-stage complex trace SVG.
+- `out/rf/`
+  - per-stage real trace CSV/SVG για RF-domain σημεια,
+  - per-stage constellation CSV/SVG και postmix complex traces.
+
+### 15.2 MATLAB output
+
+- `out/matlab/`
+  - constellation και trace figures (`.png` και `.svg`).
+
+
+## 16. Σημαντικες φυσικες παραδοχες που ειναι encoded
+
+1. Το input thermal noise υπολογιζεται με:
+
+   - `P_noise = k * T_ant * B_noise`, με `B_noise = 200 MHz`.
+
+2. Το voltage/power conversion γινεται με αναφορα 50 ohm:
+
+   - `V_rms = sqrt(P * R)`.
+
+3. Η signal waveform scaling συνδεεται με το link-budget power πριν απο stage processing.
+
+4. Ο χειρισμος stage NF ειναι local ανα stage και propagated με T0 tracker.
+
+5. Το τελικο RLM stage μοντελοποιειται ως linear attenuation/noise stage, εκτος αν οριστει ρητα/ονομαστικα ως limiter.
+
+
+## 17. Πως να επεκτεινεις το project με ασφαλη τροπο
+
+### 17.1 Προσθηκη η ρυθμιση receiver stages
+
+- Κανε edit το `stage_models/runtime_stage_models_target16.csv`.
+- Κρατα εγκυρα chain names (`baseband_rx`, `rf_frontend`, `rf_postmix_bb`).
+- Βεβαιωσου οτι και τα 3 chains εχουν δεδομενα, αλλιως ο loader αποτυγχανει.
+
+### 17.2 Προσθηκη νεου artifact type
+
+- Υλοποιησε writer στο `stage_artifacts.c`.
+- Προσθεσε declaration στο `include/stage_artifacts.h`.
+- Καλεσε τον απο τις simulation engines στο `main.c` στα stage points που θες.
+
+### 17.3 Προσθηκη νεου simulation metric
+
+- Επεκτεινε το `StageMetric` στο `include/sim_types.h`.
+- Ενημερωσε metric calculators και πινακες CSV/SVG writers.
+
+### 17.4 Προσθηκη νεου component role για sweep
+
+- Ενημερωσε τα role mapping dictionaries στο `scripts/run_component_sweep.py`.
+- Ελεγξε οτι τα generated canonical stage rows παραμενουν συμβατα με τις απαιτησεις του loader.
+
+
+## 18. Γρηγορος χαρτης troubleshooting
+
+- **"CSV must define all chains"**
+  - Το runtime stage CSV δεν εχει ολα τα chains η ενα chain εχει ολα τα rows disabled.
+
+- **"Unknown chain" / malformed row**
+  - Λαθος ονομα chain η ασυμβατοτητα header/μορφης στο CSV.
+
+- **Πολυ λαθος output amplitude**
+  - Ελεγξε τις παραδοχες input-level (uV RMS vs dBm equivalence και 50 ohm conversion).
+
+- **Sweep returns no valid results**
+  - Πιθανοτατα ασυμβατοτητα output-path contract μεταξυ sweep script και τρεχουσας C output δομης.
+
+
+## 19. Ελαχιστες εντολες
+
+Build και run C:
 
 ```bash
-cd receiver_dual_sim
-make          # Build the simulator
+make
+./bin/dual_receiver_sim --stage-csv stage_models/runtime_stage_models_target16.csv
 ```
 
-### Run with defaults
+Run MATLAB reference:
 
 ```bash
-make run      # Run with default parameters
-# or
-./bin/dual_receiver_sim
+cd matlab
+matlab -batch "sim_receiver_matlab"
+
+**Συγκεντρωτικη εκθεση**:
+- **Αρχη**: Καθαρο σημα (50 µV RMS).
+- **Διαδρομη**: 11 stages με φιλτρα, ενισχυτες, και μειξερ.
+- **Τελος**: Σημα με επαρκη amplitude (1-2 V, ανεξαρτητα απο input) και συσσωρευμενο θορυβο (κυριως απο την πρωτη LNA).
+- **Constellation εξαγωγη**: Καθε stage CSV/SVG δειχνει την "στιγμη" του σηματος σε εκεινο το σημειο της αλυσιδας.
+- **Metrics**: SNR και EVM ειδοποιουν για την υποβαθμιση της ποιοτητας καθε stage, αρκετα χρησιμα για να δουμε που χανεται το SNR.
+
 ```
 
-### Run with custom parameters
 
-```bash
-./bin/dual_receiver_sim \
-    --seed 42 \
-    --symbols 512 \
-    --snr 25 \
-    --carrier 24e9 \
-    --symbol-rate 10e6 \
-    --stage-csv stage_models/runtime_stage_models_target16.csv \
-    --stage-sim 1
-```
+## 20. Πρακτικη ανα-stage walkthrough: τι αλλαζει σε καθε σταδιο
 
-### Command-Line Options
+Ας δουμε τι συμβαινει *στην πραγματικοτητα* με το σημα σε καθε stage του τρεχοντος receiver. Θα ακολουθησουμε το **baseband_rx chain** δια μεσου:
 
-| Option | Default | Description |
-|--------|---------|-------------|
-| `--seed <int>` | current time | PRNG seed for reproducibility |
-| `--symbols <int>` | 256 | Number of symbols to simulate |
-| `--symbol-rate <Hz>` | 10e6 | Symbol rate (10 Msym/s) |
-| `--rf-fs <Hz>` | 96e9 | RF sampling rate (96 GHz) |
-| `--carrier <Hz>` | 24e9 | Carrier frequency (24 GHz) |
-| `--snr <dB>` | 20 | Input Signal-to-Noise Ratio |
-| `--stage-csv <path>` | stage_models/runtime_...csv | Stage configuration file |
-| `--topology-sim <1-4>` | 1 | Output slot (topology_sim_N) |
+### 20.1 Input αναφορα
 
-### View outputs
+Η προσομοιωση αρχιζει με ενα καθαρο εξοδο του δεκτη RF (frontendα αποδωσης) στο level που περιγραφηκε:
+- **Input level**: ~ 50 µV RMS (ανταποκρινει σε πολυ ασθενες δορυφορικο σημα).
+- **Bandwidth**: 200 MHz (thermal noise floor).
+- **Constellation**: DVB-S2X 64-APSK με 64 σημεια.
+- **I/Q trace**: Clean, zero-error constellation αν δεν προσθεσουμε θορυβο.
 
-Open any SVG file in a web browser:
-```bash
-firefox out/topology_sim_1/svg/baseband_input_snr_20p00db_evm_9p50pct.svg
-```
+Για σκοπους visualization, ολα τα stages του baseband_rx chain α γυναικες εξοδες σχεδιαζονται στο εσωτερικο του `out/baseband/` directory.
 
-### Clean
+### 20.2 Εναρξη: bb_00_switch (αποκλιση -0.30 dB, NF 0.30 dB)
 
-```bash
-make clean    # Remove binaries and output
-```
+**Τι ειναι**: RF switch με πολυ μικρη απωλεια.
+
+**Τι συμβαινει**:
+- Το σημα μειωνεται κατα **-0.30 dB** (πολυ λιγη απωλεια).
+- Προστιθεται **minimal noise**: εχει NF=0.30 dB αλλα μικρη ισχυς θορυβου σε αυτο το σταδιο.
+- **Στο output**: Η constellation παραμενει επι των ιδιων σημειων (δεν υπαρχει ακομα σημαντικος θορυβος), αλλα η amplitude εχει κοπει λιγο.
+
+**Artifacts**: `constellation_baseband_rx_bb_00_switch.csv` και `.svg` θα δειξουν τα 64 σημεια ακομα σε καθαρη διαταξη, απλα λιγο πιο μικρα.
+
+### 20.3 Προενισχυση: bb_01_preselector_bpf (απωλεια -0.40 dB, NF 0.40 dB)
+
+**Τι ειναι**: Bandpass filter που απομακρυνει εξω-ζωνης θορυβο και αλληλοπαρεμβολη.
+
+**Τι συμβαινει**:
+- Το σημα μειωνεται και παλι κατα **-0.40 dB**.
+- Η pulse shape αρχιζει να "ομαλυνεται" λιγο απο το BPF.
+- **Στα traces I/Q**: Η κυματομορφη χασει κομματι της υψηλης συχνοτητας τμηματος κατα την δειγματοληψια.
+
+### 20.4 Πρωτη ενισχυση: bb_02_lna1 (ενισχυση +29 dB, NF 1.8 dB)
+
+**Τι ειναι**: Low-Noise Amplifier με μεγαλη ενισχυση και χαμηλο θορυβο.
+
+**Τι συμβαινει**:
+- Το σημα μεγαλωνει κατα **+29 dB** (σχεδον 30x σε ισχυ).
+- Θορυβος εισαγεται αλλα **ειναι ακριβως εδω που πρεπει**: πριν απο κανα αλλο μεγαλο ενισχυτη.
+- **Στη constellation**: Τα σημεια μεγαλωνουν διαδραματικα, αλλα αν το SNR ειναι ακομα υψηλο, παραμενουν καθαρα διακριτα.
+- **Στο voltage trace**: Η amplitude πολλαπλασιαζεται με `10^(29/20) ≈ 28x`.
+
+**Στο CSV**: `stage_metrics_bb_02_lna1_* .csv` θα δειξει:
+- SNR = αρχικο SNR (λογω της χαμηλης NF),
+- Waveform amplitude = πολυ μεγαλυτερη απο τα προηγουμενα.
+
+### 20.5 Μεσοσταδιακη φιλτραρισμα: bb_03_image_rejection_filter (απωλεια -3.5 dB, NF 3.5 dB)
+
+**Τι ειναι**: Image-rejection filter για απομακρυνση του συζυγους frequency-mirrored σηματος.
+
+**Τι συμβαινει**:
+- Απωλεια **-3.5 dB** (αρκετα ισχυρη).
+- Το σημα σμικρυνεται αλλα απομακρυνονται σημαντικες συχνοτητες εκτος ζωνης.
+- **Στη constellation**: Ηδη ειδατε θορυβο/scatter απο την LNA1. Τωρα, η φιλτραρισμα αποφευγει περαιτερω αυξηση του εξω-ζωνης θορυβου.
+
+### 20.6 Μειξη προς baseband: bb_04_mixer1 (απωλεια -9.0 dB, NF 9.0 dB)
+
+**Τι ειναι**: Mixer που μεταφερει το RF σημα προς πολυ χαμηλες συχνοτητες (σχεδον baseband).
+
+**Τι συμβαινει**:
+- Απωλεια μειξης **-9.0 dB** (σημαντικη, αλλα αναμεναι).
+- Το σημα γυρizes απο "RF" σε "complex baseband" αναπαρασταση.
+- **Στη constellation**: Το scatter αρχιζει να γινεται περισσοτερο προφανες. Ενω η LNA προσθεσε θορυβο, ο mixer τον κανει ορατο με τη μειωση λαμδα.
+
+### 20.7 Τσισματισμα: bb_05_bpf2 (απωλεια -0.6 dB, NF 0.6 dB)
+
+**Τι ειναι**: Δευτερος BPF να εξα απο εξω-ζωνης παραγωγικοι του mixer (spur noise).
+
+**Τι συμβαινει**:
+- Μικρη απωλεια **-0.6 dB**.
+- Κανει τριγωνο και εξομαλυνει τους spur.
+
+### 20.8 Δευτερη ενισχυση: bb_06_lna2 (ενισχυση +23.7 dB, NF 0.27 dB)
+
+**Τι ειναι**: Δευτερος LNA, αυτη τη φορα με πολυ χαμηλο θορυβο.
+
+**Τι συμβαινει**:
+- Ενισχυση **+23.7 dB** (σχεδον 24x σε ισχυ).
+- **NF = 0.27 dB**: Πολυ καλο! Και αυτο ειναι το σημειο: απο εδω και περα, ο συνολικος θορυβος του δεκτη ειναι κυριως "προσθηκη" της πρωτης LNA.
+- **Στη constellation**: Αν υπαρχει ηδη scatter, τωρα θα ειναι παρασταθει καλυτερα απο τη μεγαλη ενισχυση.
+
+### 20.9 Τριτη μειξη: bb_07_mixer2 (απωλεια -6.5 dB, NF 6.5 dB)
+
+**Τι ειναι**: Δευτερος mixer για περαιτερω κατε-μεσοσταδιακη.
+
+**Τι συμβαινει**:
+- Απωλεια **-6.5 dB**.
+- Κι εδω ξανα, ο θορυβος προσθημενος απο την LNA2 γινεται προφανης με τη μειωση.
+
+### 20.10 Τριτη φιλτραρισμα: bb_08_bpf3 (απωλεια -3.0 dB, NF 3.0 dB)
+
+**Τι ειναι**: Τριτος BPF, συνηθως στενοτερος για τελικη αποκοπη θορυβου.
+
+**Τι συμβαινει**:
+- Απωλεια **-3.0 dB**.
+- Αυτο ειναι ο τελευταιος "φιλτρο σταθμευσης" πριν απο τον τελικο ενισχυτη απο.
+
+### 20.11 Τελικη ενισχυση με αυτοματη ρυθμιση: bb_09_lna3 (ενισχυση +50 dB, NF 3.5 dB, **auto_gain_to_vpp=1**)
+
+**Τι ειναι**: Variable-gain amplifier που στοχευει στο να εξοδο του σηματος σε ενα καθορισμενο voltage.
+
+**Τι συμβαινει**:
+- Ενισχυση **+50 dB** (μεγαλη!).
+- Αλλα μολονοτι, το `auto_gain_to_vpp=1` σημαινει οτι στο stage αυτο:
+  - Μετριεται η amplitude του σηματος I/Q,
+  - Υπολογιζεται ο απαραιτητος gain για να φτασει `target_vpp = 1.6` (voltage peak-to-peak),
+  - Το actual gain που εφαρμοζεται ειναι αυτο που υπολογιστηκε, οχι σταθερα +50 dB.
+- **Στη constellation**: Τα σημεια εχουν κυριως σταθερη amplitude (λογω της auto-gain steering).
+
+**Σημαντικο**: Εδω ειναι που ο δεκτης αρχιζει να *προσαρμοζεται* στο ασυνθετο input level. Αν το SNR του εισερχ. σηματος δυσμενησ, η auto-gain θα "ενταθει" για να παρει καθαροτερη εικονα, αλλα θα μεγαλωσει και τον θορυβο.
+
+### 20.12 Τελικο stage: bb_10_rlm43_5w (ενισχυση -0.04 dB, NF 0.04 dB)
+
+**Τι ειναι**: Integrated linear RF module με πολυ μικρη απωλεια.
+
+**Τι συμβαινει**:
+- Ενισχυση **-0.04 dB** (σχεδον καμια απωλεια).
+- Minimal noise (0.04 dB NF).
+- **Στην εξοδο**: Το constellation σε αυτο το σταδιο ειναι ουσιαστικα το ιδιο οπως το input στο stage αυτο, γιατι το RLM ειναι *σχεδον διαφανες*.
 
 ---
 
-## 12. Glossary
 
-| Term | Full Name | Description |
-|------|-----------|-------------|
-| **64-APSK** | 64-Amplitude Phase Shift Keying | Modulation with 64 symbols in 4 rings |
-| **ADC** | Analog-to-Digital Converter | Converts analog signal to digital samples |
-| **AWGN** | Additive White Gaussian Noise | Standard noise model |
-| **BPF** | Band-Pass Filter | Passes frequencies in a specific band, rejects others |
-| **dB** | Decibel | Logarithmic ratio unit (10·log₁₀) |
-| **dBm** | dB relative to 1 milliwatt | Absolute power level |
-| **DVB-S2X** | Digital Video Broadcasting - Satellite 2nd gen Extended | Satellite TV standard |
-| **EVM** | Error Vector Magnitude | RMS error relative to signal amplitude |
-| **FIR** | Finite Impulse Response | Filter type with finite-duration response |
-| **IIR** | Infinite Impulse Response | Filter type with feedback (recursive) |
-| **I/Q** | In-phase / Quadrature | Two orthogonal signal components |
-| **LNA** | Low-Noise Amplifier | First receiver amplifier (critical for noise performance) |
-| **LO** | Local Oscillator | Signal source for mixer frequency translation |
-| **LPF** | Low-Pass Filter | Passes low frequencies, rejects high frequencies |
-| **MSE** | Mean Squared Error | Average squared difference between two signals |
-| **NCO** | Numerically Controlled Oscillator | Digital sine/cosine generator |
-| **NF** | Noise Figure | Measure of noise added by a component (dB) |
-| **PRNG** | Pseudo-Random Number Generator | Deterministic algorithm producing random-looking numbers |
-| **RF** | Radio Frequency | The actual radio signal domain (e.g., 24 GHz) |
-| **SER** | Symbol Error Rate | Fraction of incorrectly decoded symbols |
-| **SNR** | Signal-to-Noise Ratio | Ratio of signal power to noise power (dB) |
-| **SPS** | Samples Per Symbol | Oversampling factor in the RF path |
-| **SVG** | Scalable Vector Graphics | XML-based vector image format |
-| **Vpp** | Volts peak-to-peak | Full voltage swing of a signal |
+---
+
+## 21. Συνοψη
+
+Αυτο το repository ειναι δομημενο γυρω απο τρια ευδιακριτα επιπεδα:
+
+- **C path** για deterministic stage-by-stage runtime simulation και artifacts,
+- **MATLAB path** για reference-level constellation validation και visualization,
+- **CSV model layer** για γρηγορη αρχιτεκτονικη/component iteration χωρις recompilation.
+
+Αν αυτα τα τρια layers μενουν ευθυγραμμισμενα (stage CSV, C assumptions, MATLAB assumptions), το project παραμενει ευκολο σε calibration και συγκριση μεταξυ εργαλειων.
+
+Ναι, και απο το stage 6 και μετα ειναι φυσιολογικο να βλεπουμε I/Q αντι για μια μονο real κυματομορφη, γιατι εκει το σημα αντιμετωπιζεται ως complex baseband. Ετσι δεν κραταμε μονο το πλατος, αλλα και τη φαση του σηματος, που ειναι αναγκαια για να περιγραφει σωστα η πληροφορια μετα το mixing και τα υπολοιπα baseband stages. Με απλα λογια, το I και το Q ειναι οι δυο ορθογωνιες συνιστωσες του ιδιου σηματος, αρα μαζι μεταφερουν ολοκληρη την πληροφορια χωρις να χανεται τιποτα.
+
+## 22. Γιατι βαζουμε το καθε component
+
+Κανενα component δεν υπαρχει τυχαια. Καθε stage μπαινει για να λυσει ενα συγκεκριμενο πρακτικο προβλημα του receiver: απορριψη ανεπιθυμητων συχνοτητων, ενισχυση αδυναμου σηματος, μεταφορα σε χαμηλοτερη συχνοτητα, και τελικη σταθεροποιηση της amplitude.
+
+### 22.1 Switch
+
+Το switch μπαινει στην αρχη για να μοντελοποιησει την πρωτη επαφη του σηματος με το frontend. Στην πραξη εχει μικρη insertion loss, αλλα ειναι αναγκαιο για να δωσει ρεαλισμο στο input path και να δειξει οτι οχι ολα τα στοιχεια ειναι ιδανικα.
+
+### 22.2 Preselector BPF
+
+Το preselector bandpass filter μπαινει για να κοψει ο,τι βρισκεται εκτος της επιθυμητης ζωνης πριν το σημα ενισχυθει. Ετσι μειωνεται ο out-of-band θορυβος και προστατευονται τα επομενα stages απο ανεπιθυμητες παρεμβολες.
+
+### 22.3 LNA1
+
+Ο πρωτος low-noise amplifier μπαινει για να σηκωσει το πολυ αδυναμο εισερχομενο σημα πανω απο το noise floor τοσο γρηγορα οσο γινεται. Αυτο ειναι κρισιμο, γιατι ο πρωτος ενισχυτης καθοριζει σε μεγαλο βαθμο το συνολικο SNR της αλυσιδας.
+
+### 22.4 Image rejection filter
+
+Αυτο το filter μπαινει για να απομακρυνει το image του mixer και τα ανεπιθυμητα κατοπτρικα συνιστωσα που δημιουργουνται απο τη μετατροπη συχνοτητας. Χωρις αυτο, το mixer θα μετεφερε και λαθος τμηματα του φασματος μεσα στη ζητη που μας ενδιαφερει.
+
+### 22.5 Mixer1
+
+Ο πρωτος mixer μπαινει για να κατεβασει το σημα απο RF σε χαμηλοτερη συχνοτητα, ωστε να γινει πιο ευκολη η περαιτερω επεξεργασια του. Στο σημειο αυτο αρχιζει να φαινεται πιο καθαρα η complex baseband συμπεριφορα του σηματος.
+
+### 22.6 BPF2
+
+Το δευτερο bandpass filter μπαινει μετα το mixer για να καθαρισει τα mixer products και τα spur που εμφανιζονται στην μετατροπη. Ειναι ουσιαστικα ενα σταδιο “καθαρισμου” πριν απο την επομενη ενισχυση.
+
+### 22.7 LNA2
+
+Ο δευτερος LNA μπαινει για να ανακτησει το επιπεδο του σηματος μετα τις προηγουμενες απωλειες, αλλα με οσο το δυνατον χαμηλο noise figure. Ετσι το σήμα παραμενει χρησιμο για τα επομενα stages χωρις να χαθει η πληροφορια του.
+
+### 22.8 Mixer2
+
+Ο δευτερος mixer μπαινει για περαιτερω frequency translation, οταν χρειαζεται το σημα να μεταφερθει ακομα πιο κοντα στη ζητη τελικης επεξεργασιας. Σε αυτη τη φαση η αλυσιδα δουλευει πλεον πιο πολυ ως baseband-oriented chain παρα ως καθαρο RF path.
+
+### 22.9 BPF3
+
+Το τριτο filter μπαινει για τελικη αποκοπη residual θορυβου και ανεπιθυμητων συχνοτητων πριν απο το τελικο gain staging. Ειναι το τελευταιο “cleanup” σταδιο πριν την εξοδο.
+
+### 22.10 LNA3 με auto-gain
+
+Ο τριτος ενισχυτης μπαινει για να φερει το σημα στο επιθυμητο level εξοδου, χωρις να βασιζεται παντα σε σταθερο gain. Το auto-gain βοηθα να πετυχουμε συγκεκριμενο target Vpp, ωστε το output να ειναι συνεπες και ευκολο να συγκριθει με το MATLAB reference.
+
+### 22.11 RLM43-5W
+
+Το τελικο RLM stage μπαινει για να μοντελοποιησει ενα πραγματικο τελευταιο linear block με σχεδον μηδενικη επιπλεον υποβαθμιση. Με αυτο το stage το chain δινει μια ρεαλιστικη τελικη εξοδο που δειχνει οτι το συστημα δεν ειναι ιδανικο, αλλα παραμενει σχεδον διαφανο στο τελος της αλυσιδας.
+
+## 23. Διαδικαστικες ρυθμισεις του simulation
+
+Για να βγαζει νοημα το output, το simulator δουλευει με συγκεκριμενες διαδικαστικες ρυθμισεις που οριζουν ποσο «γρηγορα» δειγματοληπτει το σημα και με ποια συνθηκη το τρεχει.
+
+### 23.1 Symbol rate
+
+Το symbol rate καθοριζει ποσα συμβολα περνανε ανα δευτερολεπτο. Οσο μεγαλυτερο ειναι, τοσο πιο πυκνα ειναι τα changes του σηματος και τοσο πιο απαιτητικη γινεται η δειγματοληψια.
+
+### 23.2 Sampling rate
+
+Το RF sampling rate καθοριζει ποσα samples παιρνουμε ανα δευτερολεπτο στον RF κλαδο. Πρεπει να ειναι αρκετα μεγαλυτερο απο το symbol rate, ωστε να αποτυπωνονται σωστα οι μετατροπες συχνοτητας, το filtering και η shape της κυματομορφης χωρις aliasing.
+
+### 23.3 Carrier frequency
+
+Η carrier συχνοτητα οριζει σε ποιο RF σημειο «καθεται» το σημα πριν τη μετατροπη προς baseband. Χρησιμοποιειται κυριως για να γινει ρεαλιστικη η upconversion/downconversion ροη και να φανει καθαρα η διαφορα μεταξυ RF και baseband domain.
+
+### 23.4 Input SNR
+
+Το input SNR λεει ποσο δυνατο ειναι το σημα σε σχεση με τον thermal noise floor στην εισοδο. Αυτη η τιμη καθοριζει ποσο καθαρο η ποσο θορυβωδες θα ειναι το αρχικο constellation πριν απο τα stages της αλυσιδας.
+
+### 23.5 PRNG seed
+
+Το seed του PRNG καθοριζει ποιο συγκεκριμενο τυχαιο sequence θα παραχθει για symbols και noise. Με το ιδιο seed παιρνεις reproducible αποτελεσματα, ενω με αλλο seed βλεπεις μικρες φυσικες διακυμανσεις στο output.
+
+### 23.6 Stage CSV
+
+Το stage CSV καθοριζει τη σειρα των components, τα gains, τα noise figures και το αν καποιο stage θα κανει auto-gain. Αυτο ειναι το αρχειο που μετατρεπει το simulation απο γενικη ιδεα σε συγκεκριμενη αλυσιδα δεκτη.
+
+### 23.7 Τι εχει μεσα ο κωδικας για αυτα
+
+Στο `main.c` οι βασικες τιμες μπαινουν ως defaults και μετα μπορουν να αλλαξουν απο τα CLI flags:
+
+- `cfg.symbol_rate_hz = 10.0e6` και δινει το `--symbol-rate`, που στο code χρησιμοποιειται για το symbol timing, το noise bandwidth handling και το downconversion/filter cutoff logic.
+- `cfg.rf_sample_rate_hz = 192.0e9` και δινει το `--rf-fs`, που στον RF κλαδο καθοριζει τα samples per symbol ως `sps = round(rf_sample_rate_hz / symbol_rate_hz)`.
+- `cfg.carrier_hz = 24.0e9` και δινει το `--carrier`, που χρησιμοποιειται στο `env_to_rf_real()` και στο `mix_down_and_lowpass()` για upconversion και downconversion.
+- `cfg.input_snr_db = 20.0` και δινει το `--snr`, που μπαινει στον link budget υπολογισμο για να βγει η input noise power και το αντιστοιχο signal power.
+- `cfg.seed = (unsigned int)time(NULL)` και δινει το `--seed`, που περναει στο `prng_seed(cfg.seed)` για να γινει το run reproducible οταν θες.
+- `stage_csv_path = "stage_models/runtime_stage_models_target16.csv"` και δινει το `--stage-csv`, που μετα λυνεται με `resolve_stage_csv_path()` και φορτωνεται με `stage_models_load_csv()`.
+
+Στην πραξη, το code κανει τα εξης βηματα:
+
+1. Διαβαζει τα CLI arguments και αντικαθιστα τα defaults αν δωσεις δικιες σου τιμες.
+2. Αρχικοποιει το PRNG με το seed.
+3. Υπολογιζει το thermal noise με `k*T*B`, οπου το `B` ειναι fixed στα 200 MHz.
+4. Υπολογιζει το input signal power απο το ζητουμενο SNR.
+5. Κλιμακωνει τα tx symbols στην αντιστοιχη voltage αμplitude για 50 ohm.
+6. Βγαζει το `sps` απο το ratio RF sample rate προς symbol rate και απο αυτο φτιαχνει το RF waveform.
+7. Χρησιμοποιει το stage CSV για να ξερει ποια components θα περασουν απο την αλυσιδα και με ποια σειρα.
+
+Αρα, στον κωδικα αυτα δεν υπαρχουν σαν αφηρημενες ιδεες: υπαρχουν σαν συγκεκριμενα πεδια του `SimConfig`, σαν CLI options, και σαν τιμες που επηρεαζουν αμεσα το PRNG, το budget, το oversampling και το stage processing.

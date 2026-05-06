@@ -36,7 +36,8 @@ void write_complex_trace_stage_artifacts(
     const StageMetric* metric,
     const Complex* sig,
     size_t nsym,
-    double fs_hz);
+    double fs_hz,
+    double signal_hz);
 
 void write_trace_stage_artifacts(
     const char* csv_run_dir,
@@ -51,7 +52,8 @@ void write_trace_stage_artifacts(
     const double* sig,
     size_t n,
     size_t max_points,
-    double fs_hz);
+    double fs_hz,
+    double signal_hz);
 
 int write_chain_architecture_mermaid(
     const char* path,

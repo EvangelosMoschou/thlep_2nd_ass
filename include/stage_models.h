@@ -52,17 +52,16 @@ typedef struct StageModel {
     int filter_len;
 
     /**
-     * When non-zero, the stage gain is computed automatically at run time so
-     * that the signal's peak-to-peak voltage equals @p target_vpp.
-     * The gain_db field is then ignored.
+     * When non-zero, the stage is treated as a limiter (placeholder for future use).
+     * Actual limiting behavior will be added via CSV configuration later.
      */
-    int auto_gain_to_vpp;
+    int is_limiter;
 
-    /**
-     * Target peak-to-peak voltage (V) used when @p auto_gain_to_vpp is set.
-     * Ignored when @p auto_gain_to_vpp is zero.
-     */
-    double target_vpp;
+    /** Input-referred 1dB compression point in dBm. Inf = no compression. */
+    double p1db_dbm;
+
+    /** Input-referred 3rd-order intercept point in dBm. Inf = no IMD. */
+    double ip3_dbm;
 } StageModel;
 
 /** @brief Number of distinct receiver stage chains (matches the StageChainId enum count). */
@@ -107,7 +106,7 @@ typedef struct StageModelsConfig {
  * schemas are accepted automatically:
  *
  *   **Canonical** (preferred):
- *     Columns: chain, name, gain_db, nf_db [, filter_len, auto_gain_to_vpp, target_vpp, enabled]
+ *     Columns: chain, name, gain_db, nf_db [, filter_len, is_limiter, enabled]
  *
  *   **Legacy** (backward-compatible):
  *     Columns: component, gain_db, nf_db
@@ -131,7 +130,7 @@ typedef struct StageModelsConfig {
  * @return -7  if a numeric gain/NF value is invalid.
  * @return -8  if allocating a stage entry fails.
  * @return -9  if the file contains no header row.
- * @return -10 if one or more chains have no stages after loading.
+ * @return -10 if RF chains are incomplete (missing rf_frontend or rf_postmix_bb).
  */
 int stage_models_load_csv(
     const char*       csv_path,
