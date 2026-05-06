@@ -1110,7 +1110,7 @@ static size_t trace_zoom_window_samples(size_t total_samples, double fs_hz, size
     }
     /* Post-mix stages (6+): tighter zoom */
     if (!is_input && stage_number >= 6u) {
-        periods_to_show = 0.1;
+        periods_to_show = 10.0;
     }
 
     if (signal_hz > 0.0) {
