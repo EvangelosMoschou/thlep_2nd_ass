@@ -1,0 +1,52 @@
+Task 15: Rewrite main.c as thin orchestrator
+=============================================
+
+BEFORE: 3791 lines (original monolithic main.c)
+AFTER:  2630 lines (31% reduction)
+
+Changes made:
+1. Replaced inline function definitions with module includes:
+   - constellation.h → build_dvbs2_64apsk_constellation()
+   - metrics.h → mean_power_complex(), compute_snr_db(), compute_evm_pct()
+   - cli_args.h → parse_cli_args(), cli_print_usage()
+   - output_mgr.h → ensure_output_dirs(), clean_output_dir(), get_run_dir()
+   - signal_chain.h → apply_stage_complex(), apply_stage_realistic(), compute_metric_complex()
+   - sim_baseband.h → simulate_baseband()
+   - prng.h → prng_init(), prng_gauss(), prng_uniform()
+   - physics.h → K_BOLTZMANN, B_NOISE_HZ, R_LOAD_OHM
+   - math_utils.h → db_to_lin_power(), lin_to_db()
+
+2. Removed duplicate functions from main.c:
+   - normalize_constellation, dvbs2x_quadrant_angle
+   - mean_power_complex, mean_noise_power_complex, mean_power_real, mean_noise_power_real
+   - add_awgn_complex, add_awgn_real
+   - copy_complex, scale_complex, scale_real
+   - compute_metric_complex, compute_metric_real
+   - apply_stage_complex, apply_stage_real
+   - simulate_complex_baseband (replaced by simulate_baseband)
+   - parse_u32, parse_i32, parse_double
+   - print_usage
+
+3. Updated main() to use module functions:
+   - parse_cli_args() for CLI parsing
+   - build_dvbs2_64apsk_constellation() for constellation
+   - ensure_output_dirs() with correct signature
+   - clean_output_dir() instead of clear_directory_contents
+   - simulate_baseband() instead of simulate_complex_baseband
+
+4. Fixed signal_chain.c: removed duplicate mean_power_*/mean_noise_* definitions
+
+5. Updated Makefile: added all new module sources
+
+Verification:
+- make clean && make ✓ (compiles with warnings only)
+- ./bin/dual_receiver_sim --seed 42 --symbols 100 --stage-csv stage_models/runtime_stage_models_target16.csv ✓ (runs successfully)
+- Output files generated in out/ directory ✓
+
+Remaining in main.c (RF-specific code, ~1800 lines):
+- simulate_bruteforce_rf, simulate_realistic_rf
+- SoA helpers (add_awgn_soa, scale_soa, mean_power_soa, etc.)
+- FFT functions (simple_fft, simple_ifft, fft_convolve_complex)
+- RRC pulse shaping, symbol synchronization
+- apply_stage_soa, apply_stage_real_fused
+- Global PRNG state (rng, rng_threads)

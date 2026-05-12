@@ -1,96 +1,72 @@
 /*
- * ============================================================================
- * main.c — 64-APSK Receiver Dual-Mode Simulator
- * ============================================================================
+ * main.c — 64-APSK Receiver Dual-Mode Simulator (Orchestrator)
  *
- * OVERVIEW:
- *   This is the main program body for a software simulator that models a
- *   satellite receiver processing 64-APSK signals (specifically DVB-S2X,
- *   the standard used by modern satellite TV and broadband systems).
+ * Thin orchestrator that delegates to extracted modules:
+ *   constellation, metrics, cli_args, output_mgr, signal_chain, sim_baseband, prng
  *
- *   "64-APSK" stands for 64-point Amplitude and Phase Shift Keying. It is
- *   a modulation scheme where information is encoded in 64 distinct complex
- *   symbols, each with a unique amplitude and phase. The 64 symbols are
- *   arranged in 4 concentric rings on the I/Q (In-phase / Quadrature) plane.
- *
- * TWO SIMULATION PATHS:
- *   The simulator runs TWO independent simulations and compares their results:
- *
- *   1. COMPLEX BASEBAND (Fast Analytical Path):
- *      - Works directly on complex I/Q symbol values
- *      - Does NOT model the actual 24 GHz RF carrier
- *      - Equivalent to assuming perfect upconversion and downconversion
- *      - Very fast: O(N_symbols × N_stages)
- *      - Uses the "baseband_rx" stage chain from the CSV
- *
- *   2. BRUTE-FORCE RF (Realistic Path):
- *      - Upconverts symbols to a real 24 GHz signal sampled at 96 GHz
- *      - Passes the real RF waveform through RF frontend stages
- *      - Downconverts back to complex baseband using a mixer model
- *      - Post-downconversion stages process the recovered I/Q symbols
- *      - Much slower: O(N_symbols × SPS × N_stages), where SPS ≈ 9600
- *      - Uses "rf_frontend" + "rf_postmix_bb" stage chains from the CSV
- *
- * SIGNAL FLOW (both paths):
- *   Transmitter:
- *     1. Build 64-APSK constellation (64 fixed I/Q points)
- *     2. Randomly select N symbols from the constellation
- *     3. Copy as "reference" (clean) and "received" (will be degraded)
- *     4. Add AWGN (Additive White Gaussian Noise) to the received copy
- *
- *   Receiver:
- *     5. For each stage in the receiver chain:
- *        a. Apply filter (moving average, if configured)
- *        b. Apply gain (amplification or attenuation)
- *        c. Add stage-specific noise (based on Noise Figure)
- *     6. Measure SNR and EVM at each stage
- *     7. Write CSV data and SVG visualizations
- *
- * KEY METRICS:
- *   - SNR (Signal-to-Noise Ratio, dB): Higher = better.
- *     Measures how much stronger the signal is than the noise.
- *   - EVM (Error Vector Magnitude, %): Lower = better.
- *     Measures how far received symbols deviate from their ideal positions.
- *
- * OUTPUTS:
- *   - out/topology_sim_N/csv/ — CSV data files (metrics, constellations,
- * traces)
- *   - out/topology_sim_N/svg/ — SVG chart images (viewable in any browser)
- *   - stdout — Console summary with stage-by-stage SNR/EVM table
- *
- * ============================================================================
+ * The RF simulation code (simulate_bruteforce_rf, simulate_realistic_rf) and
+ * their supporting SoA/FFT helpers remain here because they were too tightly
+ * coupled to extract.
  */
 
-#include <ctype.h>
-#include <dirent.h>
+#define _USE_MATH_DEFINES
 #include <errno.h>
-#include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <omp.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
-#include <sys/types.h>
+#include <sys/stat.h>
 #include <time.h>
 
+/* --- Extracted module headers --- */
+#include "cli_args.h"
+#include "constellation.h"
+#include "math_utils.h"
+#include "metrics.h"
+#include "output_mgr.h"
+#include "physics.h"
 #include "prng.h"
+#include "signal_chain.h"
+#include "sim_baseband.h"
 #include "sim_types.h"
 #include "stage_artifacts.h"
 #include "stage_models.h"
-#include "phase_noise.h"
-#include "iq_imbalance.h"
-#include "flicker_noise.h"
-#include "biquad_filter.h"
+
+/* --- Impairment module headers (used by realistic RF path) --- */
 #include "adc_model.h"
+#include "biquad_filter.h"
+#include "flicker_noise.h"
+#include "iq_imbalance.h"
+#include "phase_noise.h"
 
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
+/* ============================================================================
+ * CONSTANTS
+ * ============================================================================ */
 
-#define ALIGNMENT 64
+#define OUTPUT_ROOT_DIR "out"
+#define TOPOLOGY_SIM_COUNT 1
+
+/*
+ * MAX_METRICS — Maximum number of stage metric entries per simulation path.
+ * 32 is enough for chains with up to ~30 stages.
+ */
+#define MAX_METRICS 32
+
+/* ============================================================================
+ * GLOBAL PRNG STATE
+ * ============================================================================ */
+
+static PrngState rng;                              /* Serial PRNG for symbol generation */
+static PrngState rng_threads[PRNG_MAX_OMP_THREADS]; /* Per-thread PRNG for RF simulation */
+
+/* ============================================================================
+ * ALIGNED ALLOCATION HELPER
+ * ============================================================================ */
+
+#define ALIGNMENT 64u
 
 static void *alloc_aligned(size_t elem_size, size_t count) {
   size_t raw = elem_size * count;
@@ -103,232 +79,7 @@ static void *alloc_aligned(size_t elem_size, size_t count) {
 #define ALLOC_ALIGNED_D(count) ((double *)alloc_aligned(sizeof(double), (count)))
 #define ALLOC_ALIGNED_C(count) ((Complex *)alloc_aligned(sizeof(Complex), (count)))
 
-/*
- * K_BOLTZMANN — Boltzmann's constant in Joules per Kelvin (J/K).
- *
- * This fundamental physical constant relates temperature to energy.
- * It's used to calculate thermal noise power using the formula:
- *   P_noise = k_B × T × B
- * Where:
- *   k_B = 1.380649 × 10^-23 J/K (Boltzmann's constant)
- *   T   = antenna temperature in Kelvin (e.g., 150 K for a satellite dish)
- *   B   = noise bandwidth in Hz (e.g., 12 MHz for 10 Msym/s with rolloff 0.2)
- *
- * This gives the minimum possible noise power for a system at temperature T
- * over bandwidth B — the fundamental limit set by thermodynamics.
- */
-#define K_BOLTZMANN 1.380649e-23
-
-/*
- * Physical constants matching MATLAB reference (sim_receiver_matlab.m):
- *   B_NOISE_HZ  — Equivalent receiver noise bandwidth [Hz]
- *   R_LOAD_OHM  — Reference system impedance for power ↔ voltage conversion [Ω]
- *   N_T0_W      — Reference thermal noise power at T0=290 K: k_B × T0 × B_noise
- * [W] N_T0_V2     — Same in voltage-squared domain: N_T0_W × R_load [V²]
- */
-#define B_NOISE_HZ 200.0e6
-#define R_LOAD_OHM 50.0
-
-/*
- * OUTPUT_ROOT_DIR — Base directory for all simulation output files.
- * Output is organized as: out/baseband/ and out/rf/
- */
-#define OUTPUT_ROOT_DIR "out"
-#define TOPOLOGY_SIM_COUNT 1
-
-/*
- * TOPOLOGY_SIM_COUNT — Number of simulation "slots" (separate output
- * directories). Users can run up to 5 independent simulations (e.g., with
- * different stage CSV files or different SNR values) and compare results
- * side-by-side.
- */
-
-/*
- * MAX_METRICS — Maximum number of stage metric entries per simulation path.
- *
- * Each simulation path records one metric entry for:
- *   - The input (before any stages)
- *   - Each stage in the chain
- *   - (RF path only) The downconverter
- *
- * The worst-case count is:
- *   Baseband: 1 (input) + N_bb_stages
- *   RF:       1 (input_rf) + N_rf_stages + 1 (downconverter) + N_postmix_stages
- *
- * 32 is enough for chains with up to ~30 stages. If you add many stages to
- * your CSV file, you may need to increase this value.
- */
-#define MAX_METRICS 32
-
-/* ============================================================================
- * DIRECTORY MANAGEMENT UTILITIES
- * ============================================================================
- *
- * These functions create and clean the output directory structure.
- * The layout is:
- *   out/
- *   ├── topology_sim_1/
- *   │   ├── csv/   (CSV data files)
- *   │   └── svg/   (SVG chart images)
- *   ├── topology_sim_2/
- *   │   ├── csv/
- *   │   └── svg/
- *   ├── topology_sim_3/
- *   │   ├── csv/
- *   │   └── svg/
- *   ├── topology_sim_4/
- *   │   ├── csv/
- *   │   └── svg/
- *   └── topology_sim_5/
- *       ├── csv/
- *       └── svg/
- * ============================================================================
- */
-
-static int ensure_dir_exists(const char *path) {
-  struct stat st;
-
-  if (!path) {
-    return -1;
-  }
-
-  /* Check if the path already exists */
-  if (stat(path, &st) == 0) {
-    /* Path exists — verify it's a directory (not a regular file) */
-    return S_ISDIR(st.st_mode) ? 0 : -1;
-  }
-
-  /* Path doesn't exist — try to create it */
-  if (mkdir(path, 0777) != 0 && errno != EEXIST) {
-    return -1; /* mkdir failed and it's not because it already exists */
-  }
-
-  return 0;
-}
-
-/*
- * ensure_output_dirs — Create the complete output directory hierarchy
- *
- * What it does:
- *   Creates the "out/" root directory and the "baseband/" and "rf/"
- * subdirectories.
- *
- * Returns:
- *   0 on success, negative on failure
- */
-static int ensure_output_dirs(void) {
-  if (ensure_dir_exists(OUTPUT_ROOT_DIR) != 0) {
-    return -1;
-  }
-  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/csv") != 0) {
-    return -2;
-  }
-  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/constellations") != 0) {
-    return -3;
-  }
-  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/traces") != 0) {
-    return -4;
-  }
-  return 0;
-}
-
-/*
- * clear_directory_contents — Delete all files inside a directory (but not the
- * directory itself)
- *
- * What it does:
- *   Opens a directory, iterates through its entries, and removes each file.
- *
- * Parameters:
- *   path — Directory to clear (e.g., "out/csv")
- *
- * Returns:
- *   0 on success, negative on failure
- */
-static int clear_directory_contents(const char *path) {
-  DIR *dir;              /* Directory handle */
-  struct dirent *entry;  /* Individual directory entry */
-  char entry_path[1024]; /* Full path to the entry (for deletion) */
-  int written;
-
-  if (!path) {
-    return -1;
-  }
-
-  dir = opendir(path);
-  if (!dir) {
-    return -2; /* Directory doesn't exist or can't be read */
-  }
-
-  /* Iterate through all entries in the directory */
-  while ((entry = readdir(dir)) != NULL) {
-    /* Skip the "." and ".." entries (current and parent directory) */
-    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
-      continue;
-    }
-
-    /* Build the full path to this entry */
-    written =
-        snprintf(entry_path, sizeof(entry_path), "%s/%s", path, entry->d_name);
-    if (written < 0 || (size_t)written >= sizeof(entry_path)) {
-      closedir(dir);
-      return -3; /* Path too long */
-    }
-
-    /* Delete the file */
-    if (remove(entry_path) != 0) {
-      closedir(dir);
-      return -4; /* Deletion failed (might be a subdirectory) */
-    }
-  }
-
-  closedir(dir);
-  return 0;
-}
-
-/* ============================================================================
- * UTILITY FUNCTIONS: UNIT CONVERSION
- * ============================================================================
- *
- * Decibels (dB) are a logarithmic scale commonly used in communications:
- *   - Gain of 20 dB means the signal is 100× stronger (10^(20/10) = 100)
- *   - Gain of -3 dB means the signal is about half as strong (10^(-3/10) ≈ 0.5)
- *   - 0 dB means no change (10^0 = 1)
- *
- * We constantly convert between dB (logarithmic) and linear scales because:
- *   - Humans think in dB (20 dB + 3 dB = 23 dB)
- *   - Math operations need linear (multiply: 100 × 2 = 200)
- * ============================================================================
- */
-
-/*
- * db_to_lin — Convert a value from decibels to linear scale
- *
- * Formula:  linear = 10^(dB / 10)
- *
- * Examples:
- *   db_to_lin(0)   → 1.0        (0 dB = no change)
- *   db_to_lin(10)  → 10.0       (10 dB = 10× amplification)
- *   db_to_lin(20)  → 100.0      (20 dB = 100× amplification)
- *   db_to_lin(-3)  → ~0.5       (-3 dB ≈ half power)
- *   db_to_lin(-10) → 0.1        (-10 dB = 10× attenuation)
- */
-static double db_to_lin(double x_db) { return pow(10.0, x_db / 10.0); }
-
-/*
- * lin_to_db — Convert a value from linear scale to decibels
- *
- * Formula:  dB = 10 × log10(linear)
- *
- * Special case: if the linear value is ≤ 0, returns -infinity
- * (you can't take the log of zero or negative numbers)
- */
-static double lin_to_db(double x_lin) {
-  if (x_lin <= 0.0) {
-    return -INFINITY; /* -∞ dB = zero power (or negative = undefined) */
-  }
-  return 10.0 * log10(x_lin);
-}
+/* math_utils.h provides db_to_lin_power, lin_to_db */
 
 /* ============================================================================
  * 64-APSK CONSTELLATION CONSTRUCTION
@@ -343,173 +94,6 @@ static double lin_to_db(double x_lin) {
  * ============================================================================
  */
 
-/*
- * normalize_constellation — Scale all constellation points to have unit average
- * power
- *
- * What it does:
- *   1. Calculates the mean power: P = (1/N) × Σ|c_i|² = (1/N) × Σ(I² + Q²)
- *   2. Divides every point by sqrt(P) so the new mean power is exactly 1.0
- *
- * Why it's needed:
- *   The DVB-S2X constellation is defined with specific ring radii (1.0, 1.88,
- *   2.72, 3.95), but the average power of these points is NOT 1.0.
- *   By normalizing to unit power (Es = 1), we can specify SNR directly — if
- *   the signal power is 1.0, then the noise power needed for 20 dB SNR is
- *   simply 1/100 = 0.01, regardless of the original constellation scaling.
- *
- * Parameters:
- *   c — Array of complex constellation points (MODIFIED in-place)
- *   m — Number of points (64 for 64-APSK)
- *
- * Returns:
- *   0 on success, -1 if c is NULL or m ≤ 0, -2 if mean power is zero
- */
-static int normalize_constellation(Complex *c, int m) {
-  double p = 0.0; /* Running sum for mean power calculation */
-  int i;
-
-  if (!c || m <= 0) {
-    return -1;
-  }
-
-  /* Calculate mean power: P = (1/m) × sum of |c_i|² */
-  for (i = 0; i < m; ++i) {
-    p += c[i].re * c[i].re + c[i].im * c[i].im; /* |c_i|² = Re² + Im² */
-  }
-  p /= (double)m;
-
-  if (p <= 0.0) {
-    return -2; /* All-zero constellation — physically meaningless */
-  }
-
-  /* Scale factor: multiply each point by 1/sqrt(P) to make average power = 1 */
-  {
-    const double s = 1.0 / sqrt(p);
-    for (i = 0; i < m; ++i) {
-      c[i].re *= s;
-      c[i].im *= s;
-    }
-  }
-
-  return 0;
-}
-
-/*
- * dvbs2x_quadrant_angle — Compute the actual angle for a DVB-S2X constellation
- * point
- *
- * What it does:
- *   DVB-S2X uses quadrant symmetry: the constellation is defined for one
- *   quadrant (0 to π/2) and then mirrored into the other three quadrants.
- *   The bits p and q select which quadrant the point is in:
- *
- *   p=0, q=0: First quadrant  (0 to π/2)     → angle = +φ
- *   p=0, q=1: Second quadrant (mirrored)       → angle = -φ
- *   p=1, q=0: Third quadrant  (π to π/2)       → angle = π - φ
- *   p=1, q=1: Fourth quadrant (π to 3π/2)      → angle = π + φ
- *
- * Parameters:
- *   phi — Base angle within the first quadrant (radians)
- *   p   — Quadrant selector bit 1 (0 or 1)
- *   q   — Quadrant selector bit 2 (0 or 1)
- *
- * Returns:
- *   The actual angle (in radians) for the constellation point
- */
-static double __attribute__((unused))
-dvbs2x_quadrant_angle(double phi, unsigned int p, unsigned int q) {
-  if (p == 0u && q == 0u)
-    return phi; /* 1st quadrant: angle as-is */
-  if (p == 0u && q == 1u)
-    return -phi; /* 2nd quadrant: mirror across I-axis */
-  if (p == 1u && q == 0u)
-    return M_PI - phi; /* 3rd quadrant: mirror across Q-axis */
-  return M_PI + phi;   /* 4th quadrant: rotate 180° */
-}
-
-/*
- * build_64apsk_constellation_dvbs2 — Generate the DVB-S2X 64-APSK constellation
- *
- * What it does:
- *   Constructs all 64 complex constellation points according to the DVB-S2X
- *   standard specification. The constellation has 4 concentric rings:
- *
- *   Ring 0: radius 1.00 — innermost ring
- *   Ring 1: radius 1.88
- *   Ring 2: radius 2.72
- *   Ring 3: radius 3.95 — outermost ring
- *
- *   Each point is identified by a 6-bit label (0 to 63). The bits of the label
- *   are interpreted as follows:
- *
- *   Bit layout: [a, b, p, q, u, v]
- *
- *   Bits [5:4] = ab → Select which ring (via ring_from_ab lookup table)
- *   Bit  [3]   = q  → Quadrant selector (combined with p)
- *   Bit  [2]   = p  → Quadrant selector (combined with q)
- *   Bits [1:0] = uv → Select phase position within ring (via phi_num_from_uv)
- *
- *   The phase angle for each point is:
- *     φ = phi_num_from_uv[uv] × π/16
- *   This gives phase positions at π/16, 3π/16, 5π/16, 7π/16 in the first
- * quadrant.
- *
- *   The mapping tables ensure non-uniform angular spacing (different rings
- *   have 1, 3, 5, or 7 equally-spaced points per quadrant).
- *
- * After constructing all 64 points, normalize_constellation() is called to
- * set the average symbol energy to 1.0 (Es = 1).
- *
- * Parameters:
- *   out — Array of 64 Complex values to fill (must be pre-allocated)
- *
- * Returns:
- *   0 on success, -1 if out is NULL, -2 if normalization fails
- */
-static int build_64apsk_constellation_dvbs2(Complex *out) {
-  if (!out)
-    return -1;
-
-  /* DVB-S2 64-APSK: 4 rings of 4, 12, 20, 28 points */
-  const int n_points[4] = {4, 12, 20, 28};
-  const double ring_radii[4] = {1.0, 2.73, 4.52, 6.15};
-
-  int idx = 0;
-  for (int i = 0; i < 4; ++i) {
-    int N = n_points[i];
-    for (int k = 0; k < N; ++k) {
-      double phase = (double)k * (2.0 * M_PI / N) + (M_PI / N);
-      out[idx].re = ring_radii[i] * cos(phase);
-      out[idx].im = ring_radii[i] * sin(phase);
-      idx++;
-    }
-  }
-
-  return normalize_constellation(out, 64);
-}
-
-/*
- * generate_symbols — Create a random sequence of transmitted symbols
- *
- * What it does:
- *   Simulates a transmitter randomly selecting symbols from the 64-APSK
- *   constellation. Each symbol is chosen uniformly at random (every symbol
- *   has a 1/64 chance of being picked).
- *
- * In a real system, the transmitter would encode user data bits into symbols
- * using a specific bit-to-symbol mapping. Here we use random selection because
- * we only care about signal quality metrics (SNR/EVM), not data throughput.
- *
- * Parameters:
- *   constellation — The 64-point I/Q constellation array
- *   m             — Number of constellation points (always 64)
- *   out           — Output array for the generated symbol sequence (n entries)
- *   labels        — Output array for the transmitted symbol indices (n entries)
- *                   labels[i] = index in [0..63] of the symbol selected for
- * position i. This could be used later for Symbol Error Rate (SER) analysis. n
- * — Number of symbols to generate
- */
 static void generate_symbols(const Complex *constellation, int m, Complex *out,
                              unsigned short *labels, size_t n) {
   size_t i;
@@ -520,7 +104,7 @@ static void generate_symbols(const Complex *constellation, int m, Complex *out,
      * prng_uint32() returns a random 32-bit integer; modulo m maps it
      * to the valid range. Since m=64 is a power of 2, there's zero bias.
      */
-    const unsigned int idx = prng_uint32() % (unsigned int)m;
+    const unsigned int idx = prng_uint32(&rng) % (unsigned int)m;
 
     /* Copy the selected constellation point into the output array */
     out[i] = constellation[idx];
@@ -528,308 +112,6 @@ static void generate_symbols(const Complex *constellation, int m, Complex *out,
     /* Record which symbol was transmitted (for potential SER analysis) */
     labels[i] = (unsigned short)idx;
   }
-}
-
-/* ============================================================================
- * SIGNAL POWER AND NOISE MEASUREMENT FUNCTIONS
- * ============================================================================
- *
- * These functions compute the key signal quality indicators by comparing
- * the "reference" (ideal, noise-free) signal to the "received" (degraded)
- * signal at each point in the receiver chain.
- * ============================================================================
- */
-
-/*
- * mean_power_complex — Calculate the average power of a complex signal
- *
- * Formula: P = (1/N) × Σ(I_i² + Q_i²)
- *
- * This is the mean squared magnitude of the complex signal.
- * For a unit-power constellation (Es = 1), this should return ≈ 1.0.
- *
- * Parameters:
- *   x — Array of complex samples
- *   n — Number of samples
- *
- * Returns:
- *   Mean power (always ≥ 0). Returns 0.0 if x is NULL or n is 0.
- */
-static double mean_power_complex(const Complex *x, size_t n) {
-  size_t i;
-  double p = 0.0;
-
-  if (!x || n == 0u) {
-    return 0.0;
-  }
-
-#pragma omp parallel for reduction(+ : p)
-  for (i = 0; i < n; ++i) {
-    p += x[i].re * x[i].re + x[i].im * x[i].im; /* |x_i|² = Re² + Im² */
-  }
-  return p / (double)n; /* Average over all samples */
-}
-
-/*
- * mean_noise_power_complex — Calculate the noise power by comparing signal to
- * reference
- *
- * Formula: P_noise = (1/N) × Σ|sig_i - ref_i|²
- *          = (1/N) × Σ((sig_I - ref_I)² + (sig_Q - ref_Q)²)
- *
- * This is the Mean Squared Error (MSE) between the received and reference
- * signals. It directly measures how much the signal has been corrupted by noise
- * and processing imperfections.
- *
- * Parameters:
- *   sig — Received (degraded) signal
- *   ref — Reference (ideal) signal
- *   n   — Number of samples
- *
- * Returns:
- *   Mean noise power (MSE). Returns 0.0 if signals are identical.
- */
-static double mean_noise_power_complex(const Complex *restrict sig,
-                                       const Complex *restrict ref, size_t n) {
-  size_t i;
-  double p = 0.0;
-
-  if (!sig || !ref || n == 0u) {
-    return 0.0;
-  }
-
-#pragma omp parallel for reduction(+ : p)
-  for (i = 0; i < n; ++i) {
-    const double dr = sig[i].re - ref[i].re; /* I-component error */
-    const double di = sig[i].im - ref[i].im; /* Q-component error */
-    p += dr * dr + di * di;                  /* Squared error magnitude */
-  }
-  return p / (double)n;
-}
-
-/*
- * mean_power_real — Calculate the average power of a real-valued signal
- *
- * Formula: P = (1/N) × Σ x_i²
- *
- * Used for RF signals, which are real-valued (not complex).
- */
-static double mean_power_real(const double *x, size_t n) {
-  size_t i;
-  double p = 0.0;
-
-  if (!x || n == 0u) {
-    return 0.0;
-  }
-
-#pragma omp parallel for reduction(+ : p)
-  for (i = 0; i < n; ++i) {
-    p += x[i] * x[i];
-  }
-  return p / (double)n;
-}
-
-/*
- * mean_noise_power_real — Noise power for real signals (MSE between sig and
- * ref)
- */
-static double mean_noise_power_real(const double *restrict sig,
-                                   const double *restrict ref, size_t n) {
-  size_t i;
-  double p = 0.0;
-
-  if (!sig || !ref || n == 0u) {
-    return 0.0;
-  }
-
-#pragma omp parallel for reduction(+ : p)
-  for (i = 0; i < n; ++i) {
-    const double d = sig[i] - ref[i];
-    p += d * d;
-  }
-  return p / (double)n;
-}
-
-static void add_awgn_complex(Complex *x, size_t n, double noise_power) {
-  size_t i;
-  double sigma;
-
-  if (!x || n == 0u || noise_power <= 0.0) {
-    return;
-  }
-
-  sigma = sqrt(noise_power / 2.0);
-#pragma omp parallel for schedule(static)
-  for (i = 0; i < n; ++i) {
-    x[i].re += sigma * prng_gauss_parallel();
-    x[i].im += sigma * prng_gauss_parallel();
-  }
-}
-
-/*
- * add_awgn_real — Add AWGN to a real-valued signal
- *
- * What it does:
- *   Adds Gaussian noise with standard deviation σ = sqrt(noise_power) to each
- * sample. For real signals, the entire noise power goes into a single
- * dimension.
- */
-static void add_awgn_real(double *x, size_t n, double noise_power) {
-  size_t i;
-  double sigma;
-
-  if (!x || n == 0u || noise_power <= 0.0) {
-    return;
-  }
-
-  sigma = sqrt(noise_power);
-#pragma omp parallel for schedule(static)
-  for (i = 0; i < n; ++i) {
-    x[i] += sigma * prng_gauss_parallel();
-  }
-}
-
-/* ============================================================================
- * VECTOR OPERATIONS (Copy, Scale, Filter)
- * ============================================================================
- */
-
-/* copy_complex — Memory copy of n complex values from src to dst */
-static void copy_complex(Complex *restrict dst, const Complex *restrict src,
-                         size_t n) {
-  if (!dst || !src || n == 0u) {
-    return;
-  }
-  memcpy(dst, src, n * sizeof(Complex));
-}
-
-/*
- * scale_complex — Multiply every sample by a constant amplitude factor
- *
- * This models amplification (amp > 1) or attenuation (amp < 1).
- * Both I and Q components are scaled equally.
- */
-static void scale_complex(Complex *x, size_t n, double amp) {
-  size_t i;
-
-  if (!x || n == 0u) {
-    return;
-  }
-
-#pragma omp parallel for
-  for (i = 0; i < n; ++i) {
-    x[i].re *= amp;
-    x[i].im *= amp;
-  }
-}
-
-/* scale_real — Multiply every real sample by a constant */
-static void scale_real(double *x, size_t n, double amp) {
-  size_t i;
-
-  if (!x || n == 0u) {
-    return;
-  }
-
-#pragma omp parallel for
-  for (i = 0; i < n; ++i) {
-    x[i] *= amp;
-  }
-}
-
-/* ============================================================================
- * STAGE METRICS COMPUTATION
- * ============================================================================
- */
-
-/*
- * compute_metric_complex — Calculate SNR and EVM from reference vs. received
- * complex signals
- *
- * What it does:
- *   Compares the clean reference signal to the degraded received signal and
- *   computes:
- *
- *   SNR (Signal-to-Noise Ratio):
- *     SNR_dB = 10 × log10(P_signal / P_noise)
- *     where P_signal = mean_power(ref), P_noise = MSE(sig, ref)
- *
- *   EVM (Error Vector Magnitude):
- *     EVM_% = sqrt(P_noise / P_signal) × 100
- *     This is the RMS of the error vectors, normalized by the signal amplitude.
- *     An EVM of 10% means the average error is 10% of the signal amplitude.
- *
- * Parameters:
- *   stage  — Name of the stage (stored in the metric, not used for computation)
- *   domain — Signal domain string (e.g., "complex_baseband", "rf_to_bb")
- *   ref    — Clean reference signal
- *   sig    — Degraded received signal
- *   n      — Number of samples
- *
- * Returns:
- *   A fully populated StageMetric struct
- */
-static StageMetric compute_metric_complex(const char *stage, const char *domain,
-                                          const Complex *restrict ref,
-                                          const Complex *restrict sig, size_t n) {
-  StageMetric m;
-
-  m.stage = stage;
-  m.domain = domain;
-  m.gain_db = NAN;
-  m.nf_db = NAN;
-  m.filter_len = 0;
-  m.is_limiter = 0;
-  m.signal_power = mean_power_complex(ref, n);
-  m.noise_power = mean_noise_power_complex(sig, ref, n);
-
-  /* Compute SNR and EVM, handling edge cases */
-  if (m.signal_power > 0.0 && m.noise_power > 0.0) {
-    m.snr_db = lin_to_db(m.signal_power / m.noise_power); /* Normal case */
-    m.evm_pct = sqrt(m.noise_power / m.signal_power) * 100.0;
-  } else if (m.signal_power > 0.0 && m.noise_power == 0.0) {
-    m.snr_db = INFINITY; /* Perfect signal — no noise at all */
-    m.evm_pct = 0.0;
-  } else {
-    m.snr_db = -INFINITY; /* No signal — meaningless */
-    m.evm_pct = NAN;      /* EVM undefined if there's no signal */
-  }
-
-  return m;
-}
-
-/*
- * compute_metric_real — Calculate SNR for real signals (EVM is undefined for
- * real signals)
- *
- * Same as compute_metric_complex but for real-valued signals.
- * EVM is always set to NaN because it's only meaningful for I/Q constellation
- * signals.
- */
-static StageMetric compute_metric_real(const char *stage, const char *domain,
-                                       const double *restrict ref,
-                                       const double *restrict sig, size_t n) {
-  StageMetric m;
-
-  m.stage = stage;
-  m.domain = domain;
-  m.gain_db = NAN;
-  m.nf_db = NAN;
-  m.filter_len = 0;
-  m.is_limiter = 0;
-  m.signal_power = mean_power_real(ref, n);
-  m.noise_power = mean_noise_power_real(sig, ref, n);
-
-  if (m.signal_power > 0.0 && m.noise_power > 0.0) {
-    m.snr_db = lin_to_db(m.signal_power / m.noise_power);
-  } else if (m.signal_power > 0.0 && m.noise_power == 0.0) {
-    m.snr_db = INFINITY;
-  } else {
-    m.snr_db = -INFINITY;
-  }
-  m.evm_pct = NAN; /* EVM is only defined for complex I/Q signals */
-
-  return m;
 }
 
 /* ============================================================================
@@ -849,176 +131,7 @@ static StageMetric compute_metric_real(const char *stage, const char *domain,
  * ============================================================================
  */
 
-/*
- * apply_stage_complex — Process a complex signal through one receiver stage
- *
- * Detailed sequence:
- *
- * STEP 1 — FILTER (optional, if filter_len > 1):
- *   Apply a moving-average low-pass filter to both reference and signal.
- *   The filter smooths the signal and reduces out-of-band noise.
- *   After filtering, the T0 tracker is adjusted proportionally to how much
- *   the filter reduced the noise power.
- *
- * STEP 2 — GAIN:
- *   Multiply both reference and signal by the voltage gain factor:
- *     voltage_gain = sqrt(10^(gain_db/10))
- *   Note: gain_db is a POWER gain in dB, but we need VOLTAGE gain (amplitude).
- *   Since power ∝ voltage², voltage_gain = sqrt(power_gain_linear).
- *   The T0 tracker is multiplied by the power gain (voltage_gain²).
- *
- * STEP 3 — NOISE INJECTION:
- *   Calculate excess noise from the stage's Noise Figure (NF):
- *     NF = the ratio of output SNR to input SNR for the stage.
- *     F = 10^(NF_dB/10)  — NF in linear scale
- *     If F < 1, clamp to 1 (NF < 0 dB is physically impossible)
- *
- *   Added noise power = pn_t0_track × (F - 1)
- *   where pn_t0_track is the reference noise power that accounts for
- *   all previous gains and filters. This makes later stages add less
- *   noise relative to the signal (Friis formula behavior).
- *
- * Parameters:
- *   stg          — Stage model (gain, NF, filter settings)
- *   ref          — Reference signal (MODIFIED in-place by filter and gain)
- *   sig          — Received signal (MODIFIED by filter, gain, AND noise)
- *   n            — Number of samples
- *   domain       — Signal domain string (for the metric label)
- *   pn_t0_track  — T0-referenced noise power tracker (MODIFIED in-place)
- *
- * Returns:
- *   StageMetric with SNR and EVM measured AFTER processing
- */
-static StageMetric apply_stage_complex(const StageModel *stg,
-                                      Complex *restrict ref,
-                                      Complex *restrict sig, size_t n,
-                                       const char *domain, double N_t0_W,
-                                       double *N_current, double *Gain_total,
-                                       double P_sig_in_W) {
-  double amp_gain; /* Voltage gain (linear) = sqrt(power_gain_linear) */
-  double g_lin;    /* Power gain (linear) */
-  double F;        /* Noise Figure in linear scale */
-  double pn_add;   /* Additional noise power from this stage */
-  double N_t0_v2;  /* N_t0 in voltage-squared domain */
-  size_t i;
-
-  N_t0_v2 = N_t0_W * R_LOAD_OHM;
-
-  /* --- STEP 0: NONLINEARITY (IP3 and P1dB) --- */
-  if (stg->ip3_dbm != INFINITY || stg->p1db_dbm != INFINITY) {
-    double iip3_v2 = 0, ip1db_v2 = 0;
-    if (stg->ip3_dbm != INFINITY) {
-      double iip3_w = pow(10.0, (stg->ip3_dbm - 30.0) / 10.0);
-      iip3_v2 = iip3_w * R_LOAD_OHM;
-    }
-    if (stg->p1db_dbm != INFINITY) {
-      double ip1db_w = pow(10.0, (stg->p1db_dbm - 30.0) / 10.0);
-      ip1db_v2 = ip1db_w * R_LOAD_OHM;
-    }
-
-#pragma omp parallel for
-    for (i = 0; i < n; i++) {
-      double p_in_inst = ref[i].re * ref[i].re + ref[i].im * ref[i].im;
-      double scale = 1.0;
-
-      if (stg->ip3_dbm != INFINITY) {
-        double comp = (1.0 / 3.0) * (p_in_inst / iip3_v2);
-        if (comp > 0.9)
-          comp = 0.9;
-        scale *= (1.0 - comp);
-      }
-
-      if (stg->p1db_dbm != INFINITY) {
-        if (p_in_inst > (ip1db_v2 * 0.794)) {
-          scale *= sqrt(ip1db_v2 / p_in_inst);
-        }
-      }
-
-      ref[i].re *= scale;
-      ref[i].im *= scale;
-    }
-
-#pragma omp parallel for
-    for (i = 0; i < n; i++) {
-      double p_in_inst = sig[i].re * sig[i].re + sig[i].im * sig[i].im;
-      double scale = 1.0;
-
-      if (stg->ip3_dbm != INFINITY) {
-        double comp = (1.0 / 3.0) * (p_in_inst / iip3_v2);
-        if (comp > 0.9)
-          comp = 0.9;
-        scale *= (1.0 - comp);
-      }
-
-      if (stg->p1db_dbm != INFINITY) {
-        if (p_in_inst > (ip1db_v2 * 0.794)) {
-          scale *= sqrt(ip1db_v2 / p_in_inst);
-        }
-      }
-
-      sig[i].re *= scale;
-      sig[i].im *= scale;
-    }
-  }
-
-  /* --- STEP 1: GAIN --- */
-  g_lin = db_to_lin(stg->gain_db);
-  amp_gain = sqrt(g_lin);
-  scale_complex(ref, n, amp_gain);
-  scale_complex(sig, n, amp_gain);
-
-  /* --- STEP 2: NOISE INJECTION (MATLAB-exact Friis formula) --- */
-  F = db_to_lin(stg->nf_db);
-  if (F < 1.0) {
-    F = 1.0;
-  }
-
-  pn_add = N_t0_v2 * g_lin * (F - 1.0);
-  if (pn_add > 0.0) {
-    add_awgn_complex(sig, n, pn_add);
-  }
-
-  /* --- STEP 3: Update Friis analytic tracker (MATLAB lines 242-279) --- */
-  {
-    double P_added_W = N_t0_W * g_lin * (F - 1.0);
-    *Gain_total *= g_lin;
-    *N_current = (*N_current) * g_lin + P_added_W;
-  }
-
-  /* --- STEP 4: LIMITER --- */
-  if (stg->is_limiter) {
-    const double placeholder_max_amp =
-        10.0; /* Vpp = 20V max - won't activate */
-    size_t i;
-    for (i = 0; i < n; ++i) {
-      double mag_ref = sqrt(ref[i].re * ref[i].re + ref[i].im * ref[i].im);
-      double mag_sig = sqrt(sig[i].re * sig[i].re + sig[i].im * sig[i].im);
-
-      if (mag_ref > placeholder_max_amp && mag_ref > 0.0) {
-        ref[i].re = (ref[i].re / mag_ref) * placeholder_max_amp;
-        ref[i].im = (ref[i].im / mag_ref) * placeholder_max_amp;
-      }
-      if (mag_sig > placeholder_max_amp && mag_sig > 0.0) {
-        sig[i].re = (sig[i].re / mag_sig) * placeholder_max_amp;
-        sig[i].im = (sig[i].im / mag_sig) * placeholder_max_amp;
-      }
-    }
-  }
-
-  /* Measure EVM and compute analytic Friis SNR */
-  StageMetric m_out = compute_metric_complex(stg->name, domain, ref, sig, n);
-  m_out.gain_db = stg ? stg->gain_db : NAN;
-  m_out.nf_db = stg ? stg->nf_db : NAN;
-  m_out.filter_len = stg ? stg->filter_len : 0;
-  m_out.is_limiter = stg ? stg->is_limiter : 0;
-
-  /* Override SNR with analytic Friis value (matching MATLAB's snr_curr) */
-  if (N_current && Gain_total && *N_current > 0.0) {
-    double P_sig_curr = P_sig_in_W * (*Gain_total);
-    m_out.snr_db = lin_to_db(P_sig_curr / (*N_current));
-  }
-  return m_out;
-}
+/* signal_chain.h provides apply_stage_complex */
 
 /*
  * apply_stage_real_fused — Fused single-pass RF stage processing
@@ -1040,9 +153,9 @@ static StageMetric apply_stage_real_fused(const StageModel *stg,
 
   N_t0_v2 = N_t0_W * R_LOAD_OHM;
 
-  g_lin = db_to_lin(stg->gain_db);
+  g_lin = db_to_lin_power(stg->gain_db);
   double amp_gain = sqrt(g_lin);
-  F = db_to_lin(stg->nf_db);
+  F = db_to_lin_power(stg->nf_db);
   if (F < 1.0) F = 1.0;
   pn_add = N_t0_v2 * g_lin * (F - 1.0) * (fs_hz / (2.0 * B_NOISE_HZ));
 
@@ -1094,7 +207,7 @@ static StageMetric apply_stage_real_fused(const StageModel *stg,
     double s = sig[i] * s_scale * amp_gain;
 
     if (sigma > 0.0) {
-      s += sigma * prng_gauss_parallel();
+      s += sigma * prng_gauss_parallel(rng_threads);
     }
 
     if (has_limiter) {
@@ -1121,135 +234,6 @@ static StageMetric apply_stage_real_fused(const StageModel *stg,
     m_out.filter_len = stg ? stg->filter_len : 0;
     m_out.is_limiter = stg ? stg->is_limiter : 0;
 
-    if (N_current && Gain_total && *N_current > 0.0) {
-      double P_sig_curr = P_sig_in_W * (*Gain_total);
-      m_out.snr_db = lin_to_db(P_sig_curr / (*N_current));
-    }
-    return m_out;
-  }
-}
-
-/*
- * apply_stage_real — Process a real (non-complex) signal through one receiver
- * stage
- *
- * Identical logic to apply_stage_complex, but operates on double arrays
- * instead of Complex arrays. Used for the RF frontend path where signals
- * are real-valued (not I/Q complex pairs).
- *
- * EVM in the returned metric is always NaN (undefined for real signals).
- */
-static StageMetric apply_stage_real(const StageModel *stg,
-                                   double *restrict ref, double *restrict sig,
-                                   size_t n, const char *domain,
-                                    double N_t0_W, double fs_hz,
-                                    double __attribute__((unused)) fc_hz,
-                                    double *N_current, double *Gain_total,
-                                    double P_sig_in_W) {
-  double amp_gain;
-  double g_lin;
-  double F;
-  double pn_add;
-  double N_t0_v2 = N_t0_W * R_LOAD_OHM;
-  size_t i;
-
-  /* --- STEP 0: NONLINEARITY (IP3 and P1dB) --- */
-  if (stg->ip3_dbm != INFINITY || stg->p1db_dbm != INFINITY) {
-    double iip3_v2 = 0, ip1db_v2 = 0;
-    if (stg->ip3_dbm != INFINITY) {
-      double iip3_w = pow(10.0, (stg->ip3_dbm - 30.0) / 10.0);
-      iip3_v2 = iip3_w * R_LOAD_OHM;
-    }
-    if (stg->p1db_dbm != INFINITY) {
-      double ip1db_w = pow(10.0, (stg->p1db_dbm - 30.0) / 10.0);
-      ip1db_v2 = ip1db_w * R_LOAD_OHM;
-    }
-
-#pragma omp parallel for
-    for (i = 0; i < n; i++) {
-      double p_in_inst = sig[i] * sig[i];
-      double scale = 1.0;
-
-      if (stg->ip3_dbm != INFINITY) {
-        double comp = (1.0 / 3.0) * (p_in_inst / iip3_v2);
-        if (comp > 0.9)
-          comp = 0.9;
-        scale *= (1.0 - comp);
-      }
-
-      if (stg->p1db_dbm != INFINITY) {
-        if (p_in_inst > (ip1db_v2 * 0.794)) {
-          scale *= sqrt(ip1db_v2 / p_in_inst);
-        }
-      }
-
-      sig[i] *= scale;
-    }
-  }
-
-  /* STEP 1: GAIN */
-  g_lin = db_to_lin(stg->gain_db);
-  amp_gain = sqrt(g_lin);
-  scale_real(ref, n, amp_gain);
-  scale_real(sig, n, amp_gain);
-
-  /* STEP 2: NOISE INJECTION (MATLAB-exact Friis formula with RF bandwidth
-   * correction) */
-  /*
-   * MATLAB formula: P_added = N_t0 * g_lin * (F - 1)  [Watts]
-   * In voltage-squared domain: noise_var_bb = P_added * R_load = N_t0_v2 *
-   * g_lin * (F - 1)
-   *
-   * RF bandwidth correction: the real RF signal spans [0, fs/2] Hz,
-   * but the physical noise formula is defined for B_noise (200 MHz).
-   * We spread the noise across the full RF bandwidth so that after
-   * downconversion (which selects ~B_noise bandwidth), we recover
-   * the correct baseband noise power:
-   *   noise_var_rf = noise_var_bb × (fs / (2 × B_noise))
-   */
-  F = db_to_lin(stg->nf_db);
-  if (F < 1.0) {
-    F = 1.0;
-  }
-
-  pn_add = N_t0_v2 * g_lin * (F - 1.0) * (fs_hz / (2.0 * B_NOISE_HZ));
-  if (pn_add > 0.0) {
-    add_awgn_real(sig, n, pn_add);
-  }
-
-  /* Update Friis analytic tracker */
-  {
-    double P_added_W = N_t0_W * g_lin * (F - 1.0);
-    *Gain_total *= g_lin;
-    *N_current = (*N_current) * g_lin + P_added_W;
-  }
-
-  /* --- STEP 3: LIMITER --- */
-  if (stg->is_limiter) {
-    const double placeholder_max_amp = 10.0;
-    size_t i;
-#pragma omp parallel for schedule(static)
-    for (i = 0; i < n; ++i) {
-      if (ref[i] > placeholder_max_amp)
-        ref[i] = placeholder_max_amp;
-      else if (ref[i] < -placeholder_max_amp)
-        ref[i] = -placeholder_max_amp;
-
-      if (sig[i] > placeholder_max_amp)
-        sig[i] = placeholder_max_amp;
-      else if (sig[i] < -placeholder_max_amp)
-        sig[i] = -placeholder_max_amp;
-    }
-  }
-
-  {
-    StageMetric m_out = compute_metric_real(stg->name, domain, ref, sig, n);
-    m_out.gain_db = stg ? stg->gain_db : NAN;
-    m_out.nf_db = stg ? stg->nf_db : NAN;
-    m_out.filter_len = stg ? stg->filter_len : 0;
-    m_out.is_limiter = stg ? stg->is_limiter : 0;
-
-    /* Override SNR with analytic Friis value */
     if (N_current && Gain_total && *N_current > 0.0) {
       double P_sig_curr = P_sig_in_W * (*Gain_total);
       m_out.snr_db = lin_to_db(P_sig_curr / (*N_current));
@@ -1713,8 +697,8 @@ static void add_awgn_soa(double *restrict re, double *restrict im, size_t n,
   sigma = sqrt(noise_power / 2.0);
 #pragma omp parallel for schedule(static)
   for (i = 0; i < n; ++i) {
-    re[i] += sigma * prng_gauss_parallel();
-    im[i] += sigma * prng_gauss_parallel();
+    re[i] += sigma * prng_gauss_parallel(rng_threads);
+    im[i] += sigma * prng_gauss_parallel(rng_threads);
   }
 }
 
@@ -1820,13 +804,13 @@ static StageMetric apply_stage_soa(
   }
 
   /* --- STEP 1: GAIN --- */
-  g_lin = db_to_lin(stg->gain_db);
+  g_lin = db_to_lin_power(stg->gain_db);
   amp_gain = sqrt(g_lin);
   scale_soa(ref_re, ref_im, n, amp_gain);
   scale_soa(sig_re, sig_im, n, amp_gain);
 
   /* --- STEP 2: NOISE INJECTION --- */
-  F = db_to_lin(stg->nf_db);
+  F = db_to_lin_power(stg->nf_db);
   if (F < 1.0) F = 1.0;
   pn_add = N_t0_v2 * g_lin * (F - 1.0);
   if (pn_add > 0.0) {
@@ -2011,152 +995,6 @@ static void shape_symbols_rrc_to_env_soa(const Complex *restrict symbols,
  * measures quality, and writes output files.
  * ============================================================================
  */
-
-/*
- * simulate_complex_baseband — Run the fast analytical baseband simulation
- *
- * What it does:
- *   This is the "quick and clean" simulation path. It processes complex I/Q
- *   symbols directly through the baseband_rx chain without any RF modulation.
- *
- * Signal flow:
- *   1. Copy the transmitted symbols as both "reference" (clean) and "signal"
- * (will be noisy)
- *   2. Add AWGN noise to the signal based on the configured input SNR
- *   3. Initialize the T0 noise tracker (for Friis-like stage noise behavior)
- *   4. Record the input constellation metrics
- *   5. For each stage in the baseband_rx chain:
- *      a. Apply the stage (filter → gain → noise injection)
- *      b. Write constellation CSV and SVG outputs
- *   6. Measure the final peak-to-peak voltage
- *
- * Parameters:
- *   cfg          — Simulation configuration (SNR, carrier, etc.)
- *   stage_cfg    — Loaded stage chain configuration from CSV
- *   tx_symbols   — Transmitted 64-APSK symbols (nsym values)
- *   nsym         — Number of symbols
- *   metrics      — Output array for stage metrics (caller provides MAX_METRICS
- * buffer) metric_count — Output: number of metrics actually filled final_vpp —
- * Output: peak-to-peak voltage of the reference signal after all stages
- *   csv_run_dir  — Directory for CSV output files
- *   svg_run_dir  — Directory for SVG output files
- *
- * Returns:
- *   0 on success, -1 on memory error, -2 if chain is missing, -3 if MAX_METRICS
- * exceeded
- */
-static int __attribute__((unused)) simulate_complex_baseband(
-    const SimConfig *cfg, const StageModelsConfig *stage_cfg,
-    const Complex *tx_symbols, const Complex *constellation_template,
-    size_t constellation_count, size_t nsym, StageMetric *metrics,
-    size_t *metric_count, double *final_vpp, const char *csv_dir,
-    const char *const_dir, const char *trace_dir) {
-
-  const StageModel *stages = NULL;
-
-  /* Get the baseband_rx stage chain */
-  const size_t stage_count =
-      stage_models_get(stage_cfg, STAGE_CHAIN_BASEBAND_RX, &stages);
-  size_t m = 0u; /* Metric counter */
-  size_t i;
-  Complex *ref; /* Reference (clean) signal copy */
-  Complex *sig; /* Received (noisy) signal copy */
-
-  if (!stages || stage_count == 0u || !csv_dir || !const_dir || !trace_dir) {
-    return -2;
-  }
-
-  /* Check that we have enough metric slots */
-  if (stage_count + 1u > MAX_METRICS) {
-    fprintf(stderr,
-            "baseband_rx has %zu stages; increase MAX_METRICS (currently %d)\n",
-            stage_count, MAX_METRICS);
-    return -3;
-  }
-
-  /* Allocate working copies of the signal */
-  ref = (Complex *)calloc(nsym, sizeof(Complex));
-  sig = (Complex *)calloc(nsym, sizeof(Complex));
-  if (!ref || !sig) {
-    free(ref);
-    free(sig);
-    return -1; /* Memory allocation failed */
-  }
-
-  /* Copy transmitted symbols as both reference and signal */
-  copy_complex(ref, tx_symbols, nsym);
-  copy_complex(sig, tx_symbols, nsym);
-
-  /* Add AWGN to the received signal at the specified input SNR level */
-  {
-    const double ps = mean_power_complex(ref, nsym); /* Signal power */
-    const double pn =
-        ps / db_to_lin(cfg->input_snr_db); /* Noise power for desired SNR */
-    add_awgn_complex(sig, nsym, pn);
-  }
-
-  /*
-   * MATLAB-exact physical noise constant and Friis trackers:
-   *   N_t0_W = k_B * T0 * B_noise (Watts, matching MATLAB)
-   *   N_current = running accumulated noise power (Watts)
-   *   Gain_total = total linear power gain up to this stage
-   */
-  const double N_t0_W_bb = K_BOLTZMANN * cfg->t0_k * B_NOISE_HZ;
-  double N_current_bb = K_BOLTZMANN * cfg->antenna_temp_k *
-                        B_NOISE_HZ; /* MATLAB: N_current = P_noise_in_W */
-  double Gain_total_bb = 1.0;
-  const double P_sig_in_W_bb = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ *
-                               db_to_lin(cfg->input_snr_db);
-
-  /* Record the INPUT constellation (before any stages) */
-  {
-    metrics[m] =
-        compute_metric_complex("input", "complex_baseband", ref, sig, nsym);
-    /* Compute analytic input SNR */
-    if (N_current_bb > 0.0) {
-      metrics[m].snr_db = lin_to_db(P_sig_in_W_bb / N_current_bb);
-    }
-    write_constellation_stage_artifacts(csv_dir, const_dir, "constellations",
-                                        0u, 1, "input", &metrics[m], "Baseband",
-                                        constellation_template,
-                                        constellation_count, ref, sig, nsym);
-    write_complex_trace_stage_artifacts(
-        trace_dir, "traces", 0u, 1, "input", &metrics[m], sig, nsym,
-        cfg->symbol_rate_hz, cfg->symbol_rate_hz, -1.0);
-    ++m;
-  }
-
-  /* Process the signal through each baseband_rx stage */
-  for (i = 0u; i < stage_count; ++i) {
-    StageModel stage = stages[i];
-
-    /* Apply the stage and record the output metric */
-    metrics[m] = apply_stage_complex(&stage, ref, sig, nsym, "complex_baseband",
-                                     N_t0_W_bb, &N_current_bb, &Gain_total_bb,
-                                     P_sig_in_W_bb);
-
-    /* Write constellation artifacts (CSV data + SVG plot) */
-    write_constellation_stage_artifacts(csv_dir, const_dir, "constellations",
-                                        i + 1u, 0, stage.name, &metrics[m],
-                                        "Baseband", constellation_template,
-                                        constellation_count, ref, sig, nsym);
-
-    write_complex_trace_stage_artifacts(
-        trace_dir, "traces", i + 1u, 0, stage.name, &metrics[m], sig, nsym,
-        cfg->symbol_rate_hz, cfg->symbol_rate_hz, -1.0);
-    ++m;
-  }
-
-  /* Report the final peak-to-peak voltage (of the clean reference) */
-  *final_vpp = complex_real_vpp(ref, nsym);
-  *metric_count = m;
-
-  /* Clean up */
-  free(ref);
-  free(sig);
-  return 0;
-}
-
 /*
  * simulate_bruteforce_rf — Run the realistic RF upconversion/downconversion
  * simulation
@@ -2223,7 +1061,7 @@ static int simulate_bruteforce_rf(
   double N_current = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
   double Gain_total = 1.0;
   const double P_sig_in_W = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ *
-                            db_to_lin(cfg->input_snr_db);
+                            db_to_lin_power(cfg->input_snr_db);
 
   /* Working buffers — SoA layout for large Complex arrays */
   double *env_re = NULL;        /* Upsampled envelope real part */
@@ -2325,7 +1163,7 @@ static int simulate_bruteforce_rf(
     return -1;
   }
 
-  prng_init_parallel((uint32_t)cfg->seed);
+  prng_init_parallel(rng_threads, (uint32_t)cfg->seed);
 
   double t0 = omp_get_wtime();
   double t_pulse = 0, t_rf_stages = 0, t_downconv = 0, t_bb_stages = 0;
@@ -2336,7 +1174,7 @@ static int simulate_bruteforce_rf(
   /* Map the shaped waveform onto the physical input power level (SoA) */
   {
     const double local_noise_w = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
-    const double tx_signal_w = local_noise_w * db_to_lin(cfg->input_snr_db);
+    const double tx_signal_w = local_noise_w * db_to_lin_power(cfg->input_snr_db);
     const double tx_target_mean_square_v = tx_signal_w * R_LOAD_OHM;
     const double tx_current_mean_square_v = mean_power_soa(env_re, env_im, nrf);
 
@@ -2657,7 +1495,7 @@ static int simulate_realistic_rf(
   double N_current = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
   double Gain_total = 1.0;
   const double P_sig_in_W = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ *
-                            db_to_lin(cfg->input_snr_db);
+                            db_to_lin_power(cfg->input_snr_db);
 
   /* Working buffers — SoA layout */
   double *env_re = NULL;
@@ -2829,7 +1667,7 @@ static int simulate_realistic_rf(
     }
   }
 
-  prng_init_parallel((uint32_t)cfg->seed);
+  prng_init_parallel(rng_threads, (uint32_t)cfg->seed);
 
   double t0 = omp_get_wtime();
   double t_pulse = 0, t_rf_stages = 0, t_downconv = 0, t_bb_stages = 0;
@@ -2840,7 +1678,7 @@ static int simulate_realistic_rf(
   /* Map the shaped waveform onto the physical input power level (SoA) */
   {
     const double local_noise_w = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
-    const double tx_signal_w = local_noise_w * db_to_lin(cfg->input_snr_db);
+    const double tx_signal_w = local_noise_w * db_to_lin_power(cfg->input_snr_db);
     const double tx_target_mean_square_v = tx_signal_w * R_LOAD_OHM;
     const double tx_current_mean_square_v = mean_power_soa(env_re, env_im, nrf);
 
@@ -2869,7 +1707,7 @@ static int simulate_realistic_rf(
     /* Step 4: Apply TX LO phase noise before upconversion */
     {
       for (i = 0; i < nrf; i++) {
-        double pn = phase_noise_generate(&tx_lo_pn);
+        double pn = phase_noise_generate(&tx_lo_pn, &rng);
         double cos_pn = cos(pn);
         double sin_pn = sin(pn);
         double tmp_re = env_noisy_re[i] * cos_pn - env_noisy_im[i] * sin_pn;
@@ -2993,7 +1831,7 @@ static int simulate_realistic_rf(
   /* Step 9: Apply RX LO phase noise as complex rotation on baseband */
   {
     for (i = 0; i < nbb; i++) {
-      double pn = phase_noise_generate(&rx_lo_pn);
+      double pn = phase_noise_generate(&rx_lo_pn, &rng);
       double c = cos(pn), s = sin(pn);
       double new_re = bb_sig_re[i] * c - bb_sig_im[i] * s;
       double new_im = bb_sig_re[i] * s + bb_sig_im[i] * c;
@@ -3047,6 +1885,7 @@ static int simulate_realistic_rf(
   }
 
   /* Step 12: Process through post-mixer BB stages with biquad filters and flicker noise */
+  char realistic_stage_name[256];
   for (i = 0u; i < bb_stage_count; ++i) {
     StageModel stage = bb_stages[i];
 
@@ -3085,9 +1924,9 @@ static int simulate_realistic_rf(
     {
       size_t j;
       for (j = 0; j < nbb; j++) {
-        double fn = flicker_noise_generate(&flicker_cfg);
+        double fn = flicker_noise_generate(&flicker_cfg, &rng);
         bb_sig_re[j] += fn;
-        fn = flicker_noise_generate(&flicker_cfg);
+        fn = flicker_noise_generate(&flicker_cfg, &rng);
         bb_sig_im[j] += fn;
       }
     }
@@ -3111,13 +1950,14 @@ static int simulate_realistic_rf(
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
     }
 
+    snprintf(realistic_stage_name, sizeof(realistic_stage_name), "%s Realistic", stage.name);
     write_constellation_stage_artifacts(
-        csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, stage.name,
+        csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, realistic_stage_name,
         &metrics[m], "RF", constellation_template, constellation_count,
         tx_symbols, sig_sym, eval_n);
     pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
     write_complex_trace_stage_artifacts(
-        trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+        trace_dir, "traces", rf_stage_count + 2u + i, 0, realistic_stage_name, &metrics[m],
         temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
     ++m;
   }
@@ -3127,8 +1967,8 @@ static int simulate_realistic_rf(
     double f_in_hz = cfg->symbol_rate_hz;
     size_t j;
     for (j = 0; j < nsym; j++) {
-      adc_model_apply(&sig_sym[j].re, f_in_hz, &adc_cfg);
-      adc_model_apply(&sig_sym[j].im, f_in_hz, &adc_cfg);
+      adc_model_apply(&sig_sym[j].re, f_in_hz, &adc_cfg, &rng);
+      adc_model_apply(&sig_sym[j].im, f_in_hz, &adc_cfg, &rng);
     }
   }
 
@@ -3522,6 +2362,10 @@ int main(int argc, char **argv) {
       cfg.run_rf = 1;
     } else if (strcmp(argv[i], "--enable-realistic") == 0) {
       cfg.run_realistic = 1;
+    } else if (strcmp(argv[i], "--disable-rf") == 0) {
+      cfg.run_rf = 0;
+    } else if (strcmp(argv[i], "--disable-realistic") == 0) {
+      cfg.run_realistic = 0;
     } else {
       print_usage(argv[0]);
       return 1;
@@ -3529,10 +2373,10 @@ int main(int argc, char **argv) {
   }
 
   /* --- Initialize the PRNG --- */
-  prng_seed(cfg.seed);
+  prng_init(&rng, cfg.seed);
 
   /* --- Create output directories --- */
-  if (ensure_output_dirs() != 0) {
+  if (ensure_output_dirs(OUTPUT_ROOT_DIR, topology_sim_id) != 0) {
     fprintf(stderr, "Failed to create output directories under ./out\n");
     return 8;
   }
@@ -3579,15 +2423,15 @@ int main(int argc, char **argv) {
   }
 
   /* Clear old output files from the selected slot */
-  if (clear_directory_contents(csv_dir) != 0 ||
-      clear_directory_contents(const_dir) != 0 ||
-      clear_directory_contents(trace_dir) != 0 ||
-      clear_directory_contents(rf_csv_dir) != 0 ||
-      clear_directory_contents(rf_const_dir) != 0 ||
-      clear_directory_contents(rf_trace_dir) != 0 ||
-      clear_directory_contents(realistic_csv_dir) != 0 ||
-      clear_directory_contents(realistic_const_dir) != 0 ||
-      clear_directory_contents(realistic_trace_dir) != 0) {
+  if (clean_output_dir(csv_dir) != 0 ||
+      clean_output_dir(const_dir) != 0 ||
+      clean_output_dir(trace_dir) != 0 ||
+      clean_output_dir(rf_csv_dir) != 0 ||
+      clean_output_dir(rf_const_dir) != 0 ||
+      clean_output_dir(rf_trace_dir) != 0 ||
+      clean_output_dir(realistic_csv_dir) != 0 ||
+      clean_output_dir(realistic_const_dir) != 0 ||
+      clean_output_dir(realistic_trace_dir) != 0) {
     fprintf(
         stderr,
         "Failed to clear output directories before writing new artifacts\n");
@@ -3595,7 +2439,7 @@ int main(int argc, char **argv) {
   }
 
   /* --- Build the 64-APSK constellation --- */
-  if (build_64apsk_constellation_dvbs2(constellation) != 0) {
+  if (build_dvbs2_64apsk_constellation(constellation, 64) != 0) {
     fprintf(stderr, "Failed to build 64-APSK constellation\n");
     return 3;
   }
@@ -3646,15 +2490,20 @@ int main(int argc, char **argv) {
 
   /* --- Run Simulation Paths --- */
   if (cfg.run_bb) {
-    if (simulate_complex_baseband(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
-                                  (size_t)cfg.symbols, metrics_bb, &count_bb,
-                                  &final_vpp_bb, csv_dir, const_dir, trace_dir) != 0) {
+    SimBasebandResult bb_result;
+    memset(&bb_result, 0, sizeof(bb_result));
+    if (simulate_baseband(&cfg, &stage_cfg, constellation, 64u,
+                          tx_symbols, (size_t)cfg.symbols, &rng, &bb_result,
+                          csv_dir, const_dir, trace_dir) != 0) {
       fprintf(stderr, "Complex-baseband simulation failed\n");
       stage_models_free(&stage_cfg);
       free(tx_symbols);
       free(labels);
       return 6;
     }
+    memcpy(metrics_bb, bb_result.metrics, bb_result.count * sizeof(StageMetric));
+    count_bb = bb_result.count;
+    final_vpp_bb = bb_result.final_vpp;
   } else {
     (void)csv_dir;
     (void)const_dir;

@@ -31,6 +31,8 @@
 
 #include <stdint.h>
 
+#include "prng.h"
+
 /**
  * @brief Configuration for ADC quantization and jitter noise model.
  *
@@ -84,8 +86,9 @@ int adc_model_init(ADCModelConfig* cfg);
  * @param sample    Pointer to the sample value (modified in place).
  * @param f_in_hz   Input signal frequency in Hz (used for jitter noise).
  * @param cfg       Initialized ADC model configuration.
+ * @param prng      PRNG state for Gaussian jitter noise generation.
  */
-void adc_model_apply(double* sample, double f_in_hz, const ADCModelConfig* cfg);
+void adc_model_apply(double* sample, double f_in_hz, const ADCModelConfig* cfg, PrngState* prng);
 
 /**
  * @brief Release any internal resources held by the ADC model.

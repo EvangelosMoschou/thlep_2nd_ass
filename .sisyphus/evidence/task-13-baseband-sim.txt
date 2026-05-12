@@ -1,0 +1,43 @@
+=== Task 13: sim_baseband.c / sim_baseband.h extraction ===
+Date: Tue May 12 05:43:40 PM EEST 2026
+
+--- Compilation Test ---
+Exit code: 0
+
+--- Syntax Check (sim_baseband.c) ---
+Exit code: 0
+
+--- Syntax Check (sim_baseband.h) ---
+Exit code: 0
+
+--- QA Run: seed=42, nsym=1000, SNR=15dB ---
+=== Baseband Simulation (seed=42, nsym=1000, SNR=15.0 dB) ===
+Stages processed: 12
+Final VPP: 5.009820
+
+Stage                        SNR(dB)     EVM(%)   Gain(dB)
+-----                        -------     ------   --------
+input                         15.000     13.648        nan
+bb_00_switch                  13.493     13.617     -0.300
+bb_01_preselector_bpf         11.959     13.617     -0.400
+bb_02_lna1                     7.585     36.622     29.000
+bb_03_image_rejection_filter      7.577     36.630     -3.500
+bb_04_mixer1                   7.473     36.644     -9.000
+bb_05_bpf2                     7.456     36.653     -0.600
+bb_06_lna2                     7.447     36.580     23.700
+bb_07_mixer2                   7.446     36.583     -6.500
+bb_08_bpf3                     7.443     36.586     -3.000
+bb_09_lna3                     7.437     32.267     50.000
+bb_10_rlm43_5w                 7.437     32.267     -0.040
+
+Verification:
+  SNR monotonically decreasing: YES
+  EVM monotonically increasing: NO
+
+--- Main project build check ---
+0
+No errors (0 error count)
+
+--- Files Created ---
+include/sim_baseband.h
+src/sim_baseband.c

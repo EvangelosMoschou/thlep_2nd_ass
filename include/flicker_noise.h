@@ -25,6 +25,8 @@
 
 #include <stdint.h>
 
+#include "prng.h"
+
 /** Maximum number of octaves for the Voss-McCartney algorithm. */
 #define FLICKER_NOISE_MAX_OCTAVES 32
 
@@ -86,9 +88,10 @@ int flicker_noise_init(FlickerNoiseConfig* cfg);
  * sample counter and returns the summed output scaled correctly.
  *
  * @param cfg Initialized configuration struct (state is mutated).
+ * @param prng PRNG state for Gaussian random number generation.
  * @return One sample of 1/f noise (mean=0).
  */
-double flicker_noise_generate(FlickerNoiseConfig* cfg);
+double flicker_noise_generate(FlickerNoiseConfig* cfg, PrngState* prng);
 
 /**
  * @brief Reset the internal state of the flicker noise generator.

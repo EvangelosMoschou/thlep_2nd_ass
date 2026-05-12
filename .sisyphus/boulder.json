@@ -1,0 +1,19 @@
+{
+  "active_plan": "/mnt/shared_data/AUTH/4th Year/8th Semester/Thlep/2nd assignment/receiver_dual_sim/.sisyphus/plans/c-refactor.md",
+  "completed_at": "2026-05-12T19:26:00.000Z",
+  "started_at": "2026-05-12T13:42:12.517Z",
+  "session_ids": [
+    "ses_1e3c1717bffezIG03Gz3K2tF65"
+  ],
+  "plan_name": "c-refactor",
+  "worktree_path": null,
+  "session_origins": {
+    "ses_1e3c1717bffezIG03Gz3K2tF65": "direct"
+  },
+  "task_sessions": {},
+  "agent": "atlas",
+  "status": "completed"
+}
+  },
+  "agent": "atlas"
+}

@@ -1,0 +1,77 @@
+Task 12: Update all modules to use shared physics.h and math_utils.h
+=========================================================================
+
+Date: 2026-05-12
+
+CHANGES MADE:
+-------------
+
+1. include/math_utils.h
+   - Added #define _USE_MATH_DEFINES before <math.h> include (MSVC compat)
+   - Added #ifndef M_PI / #define M_PI fallback definition
+   - Added #ifndef M_LN2 / #define M_LN2 fallback definition
+
+2. src/biquad_filter.c
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Replaced #include <math.h> with #include "math_utils.h"
+
+3. src/adc_model.c
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Replaced #include <math.h> with #include "math_utils.h"
+
+4. src/prng.c
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Replaced #include <math.h> with #include "math_utils.h"
+
+5. src/iq_imbalance.c
+   - Removed #define _USE_MATH_DEFINES
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Removed static double db_to_lin() (amplitude variant: pow(10, x/20))
+   - Replaced #include <math.h> with #include "math_utils.h"
+   - Replaced db_to_lin() calls with db_to_lin_amplitude() (2 call sites)
+
+6. src/phase_noise.c
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Removed static double db_to_linear() (power variant: exp(db*0.1*log(10)))
+   - Replaced #include <math.h> with #include "math_utils.h"
+   - Replaced db_to_linear() calls with db_to_lin_power() (3 call sites)
+
+7. src/flicker_noise.c
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Removed local #ifndef M_LN2 / #define M_LN2 / #endif block
+   - Replaced #include <math.h> with #include "math_utils.h"
+
+8. src/constellation.c
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Replaced #include <math.h> with #include "math_utils.h"
+
+9. src/signal_chain.c
+   - Removed local #ifndef M_PI / #define M_PI / #endif block
+   - Removed #include <math.h> (math_utils.h already provides it)
+
+NOT TOUCHED (per task requirements):
+--------------------------------------
+- src/main.c — local M_PI, K_BOLTZMANN, db_to_lin, lin_to_db definitions
+  remain intact (Task 15 will handle main.c migration)
+
+QA VERIFICATION:
+----------------
+
+QA 1: Zero #ifndef M_PI blocks in non-main source files
+  PASS — only main.c retains its M_PI guard
+
+QA 2: iq_imbalance.c uses db_to_lin_amplitude() (NOT db_to_lin_power)
+  PASS — both call sites use db_to_lin_amplitude()
+
+QA 3: phase_noise.c uses db_to_lin_power()
+  PASS — all 3 call sites use db_to_lin_power()
+
+QA 4: All files compile without "implicit declaration" or "undefined reference" errors
+  PASS — make clean && make succeeds with zero new warnings
+
+QA 5: make succeeds
+  PASS — build completes successfully
+
+Build output:
+  cc -O3 -std=c11 -Wall -Wextra -pedantic -Iinclude -fopenmp src/main.c ... -o bin/dual_receiver_sim -lm -fopenmp
+  (Only pre-existing warnings in main.c: unused variable, unused function, format truncation)

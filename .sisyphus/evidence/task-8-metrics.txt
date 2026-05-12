@@ -1,0 +1,59 @@
+Task 8 — metrics.c / metrics.h Evidence
+==========================================
+Date: 2026-05-12
+
+Files Created:
+  - include/metrics.h  (public API declarations)
+  - src/metrics.c      (implementations)
+
+Functions Exported:
+  double mean_power_complex(const Complex *x, size_t n);
+  double mean_noise_power_complex(const Complex *restrict sig, const Complex *restrict ref, size_t n);
+  double mean_power_real(const double *x, size_t n);
+  double mean_noise_power_real(const double *restrict sig, const double *restrict ref, size_t n);
+  double compute_snr_db(double signal_power, double noise_power);
+  double compute_evm_pct(double signal_power, double noise_power);
+  StageMetric compute_stage_metric_complex(const char *stage, const char *domain,
+                                           const Complex *restrict ref,
+                                           const Complex *restrict sig, size_t n);
+  StageMetric compute_stage_metric_real(const char *stage, const char *domain,
+                                        const double *restrict ref,
+                                        const double *restrict sig, size_t n);
+
+Headers Included by metrics.c:
+  - <math.h>       (sqrt, INFINITY, NAN)
+  - <stddef.h>     (size_t)
+  - metrics.h      (self)
+  - sim_types.h    (Complex, StageMetric)
+  - physics.h      (K_BOLTZMANN, etc. — for future use)
+  - math_utils.h   (lin_to_db)
+
+Compilation:
+  gcc -std=c11 -Iinclude -c src/metrics.c -o /tmp/metrics.o -lm -fopenmp
+  Result: SUCCESS (no errors, no warnings)
+
+Test Compilation & Run:
+  gcc -std=c11 -Iinclude /tmp/test_metrics.c src/metrics.c -o /tmp/test_metrics -lm -fopenmp
+  Result: SUCCESS
+
+Test Results (13/13 PASS):
+  PASS: mean_power_complex = 1.3333333333
+  PASS: mean_power_complex NULL guard
+  PASS: mean_noise_power_complex = 0.7500000000
+  PASS: mean_power_real = 4.6666666667
+  PASS: mean_noise_power_real = 0.2500000000
+  PASS: compute_snr_db(100,1) = 20.000000 dB
+  PASS: compute_snr_db perfect = +INF
+  PASS: compute_snr_db no signal = -INF
+  PASS: compute_evm_pct(100,1) = 10.000000%
+  PASS: compute_evm_pct perfect = 0.0
+  PASS: compute_evm_pct no signal = NAN
+  PASS: compute_stage_metric_complex snr=20.000000 evm=10.000000%
+  PASS: compute_stage_metric_real snr=20.000000 evm=NAN (expected)
+
+Edge Cases Verified:
+  - NULL pointer input guard (returns 0.0)
+  - Zero-length array (returns 0.0)
+  - Perfect signal / zero noise (SNR=+INF, EVM=0.0)
+  - No signal (SNR=-INF, EVM=NAN)
+  - Real signal EVM always NAN

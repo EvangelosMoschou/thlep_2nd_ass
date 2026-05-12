@@ -1,0 +1,59 @@
+Task 10 — Output Manager Module (output_mgr.c / output_mgr.h)
+================================================================
+
+Date: 2026-05-12
+Files created:
+  - include/output_mgr.h
+  - src/output_mgr.c
+
+Functions implemented:
+  - clean_output_dir(const char *path)
+    Extracted from main.c: clear_directory_contents()
+    Deletes files inside a dir without removing the dir itself.
+
+  - ensure_output_dirs(const char *base, int topology_id)
+    Refactored from main.c: ensure_output_dirs(void)
+    Creates full directory tree: base/, csv/, constellations/, traces/,
+    rf_baseline/{csv,constellations,traces}/,
+    realistic/{csv,constellations,traces}/
+
+  - get_run_dir(char *buf, size_t n, const char *base, int topology_id,
+                const char *path_type)
+    New utility: builds paths like "out/topology_sim_1/csv"
+
+QA Results — Test Program: /tmp/test_output_mgr.c
+--------------------------------------------------
+
+Test 1: ensure_output_dirs creates directory tree
+  PASS
+  - Verified all 10 directories created:
+    /tmp/test_output_mgr_root/
+    /tmp/test_output_mgr_root/csv/
+    /tmp/test_output_mgr_root/constellations/
+    /tmp/test_output_mgr_root/traces/
+    /tmp/test_output_mgr_root/rf_baseline/csv/
+    /tmp/test_output_mgr_root/rf_baseline/constellations/
+    /tmp/test_output_mgr_root/rf_baseline/traces/
+    /tmp/test_output_mgr_root/realistic/csv/
+    /tmp/test_output_mgr_root/realistic/constellations/
+    /tmp/test_output_mgr_root/realistic/traces/
+
+Test 2: clean_output_dir removes files
+  PASS
+  - Created 3 test .csv files in a directory
+  - Before cleanup: 3 files
+  - After cleanup: 0 files
+
+Test 3: get_run_dir builds correct paths
+  PASS
+  - Input: base="out", topology_id=1, path_type="csv"
+  - Output: "out/topology_sim_1/csv" (len=22)
+
+Test 4: clean_output_dir on nonexistent dir returns -2
+  PASS
+
+Test 5: clean_output_dir with NULL returns -1
+  PASS
+
+Compilation: gcc -std=c11 -Wall -Wextra -pedantic -Iinclude
+  Zero errors, zero warnings.

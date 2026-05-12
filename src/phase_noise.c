@@ -24,18 +24,10 @@
  */
 
 #include "phase_noise.h"
+#include "math_utils.h"
 #include "prng.h"
 
-#include <math.h>
 #include <stdio.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-static double db_to_linear(double db) {
-    return exp(db * 0.1 * log(10.0));
-}
 
 int phase_noise_init(PhaseNoiseConfig* cfg) {
     if (!cfg || cfg->sample_rate_hz <= 0.0) {
@@ -55,7 +47,7 @@ int phase_noise_init(PhaseNoiseConfig* cfg) {
     double dt = 1.0 / fs;
 
     /* White noise gain: sqrt(S_white * fs) where S_white = 10^(floor/10) */
-    double s_white = db_to_linear(cfg->white_floor_dbc_hz);
+    double s_white = db_to_lin_power(cfg->white_floor_dbc_hz);
     cfg->white_gain = sqrt(s_white * fs);
 
     /* 1/f² section: first-order IIR low-pass with corner at f2 */
@@ -71,8 +63,8 @@ int phase_noise_init(PhaseNoiseConfig* cfg) {
     cfg->a3 = alpha3;
 
     /* Branch gains from slope PSD levels */
-    double s_f2 = db_to_linear(cfg->f2_slope_dbc_hz);
-    double s_f3 = db_to_linear(cfg->f3_slope_dbc_hz);
+    double s_f2 = db_to_lin_power(cfg->f2_slope_dbc_hz);
+    double s_f3 = db_to_lin_power(cfg->f3_slope_dbc_hz);
     cfg->gain_1f2 = sqrt(s_f2 * cfg->f2_corner_hz);
     cfg->gain_1f3 = sqrt(s_f3 * cfg->f3_corner_hz);
 
@@ -83,8 +75,8 @@ int phase_noise_init(PhaseNoiseConfig* cfg) {
     return 0;
 }
 
-double phase_noise_generate(PhaseNoiseConfig* cfg) {
-    double w = prng_gauss();
+double phase_noise_generate(PhaseNoiseConfig* cfg, PrngState* prng) {
+    double w = prng_gauss(prng);
 
     double white_out = cfg->white_gain * w;
 

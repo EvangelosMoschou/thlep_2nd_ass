@@ -1,0 +1,68 @@
+Task 4: PRNG Reentrancy — Evidence
+===================================
+Date: $(date)
+
+1. DETERMINISM TEST (seed=42, serial)
+--------------------------------------
+All 10 prng_uniform values match between two independent PrngState instances
+initialized with seed 42:
+
+  [0] 8.38629710598821632e-02  ==  8.38629710598821632e-02  OK
+  [1] 3.78980250662668605e-01  ==  3.78980250662668605e-01  OK
+  [2] 6.80043411028139366e-01  ==  6.80043411028139366e-01  OK
+  [3] 9.24692945325387594e-01  ==  9.24692945325387594e-01  OK
+  [4] 9.91803914282102794e-01  ==  9.91803914282102794e-01  OK
+  [5] 7.69739460434242462e-01  ==  7.69739460434242462e-01  OK
+  [6] 7.19258577877915584e-01  ==  7.19258577877915584e-01  OK
+  [7] 8.50008443910972744e-01  ==  8.50008443910972744e-01  OK
+  [8] 7.61374381005763379e-01  ==  7.61374381005763379e-01  OK
+  [9] 5.83349309737399291e-01  ==  5.83349309737399291e-01  OK
+
+2. DIFFERENT SEED TEST (seed=99 vs seed=42)
+--------------------------------------------
+All 10 values differ between seed 42 and seed 99:
+  [0] s42=8.386e-02  s99=3.487e-01  different
+  ... (all 10 different)
+
+3. prng_uint32 DETERMINISM (seed=42)
+-------------------------------------
+  [0] 360188718  ==  360188718  OK
+  [1] 1627707782 ==  1627707782 OK
+  [2] 2920764210 ==  2920764210 OK
+  [3] 3971525959 ==  3971525959 OK
+  [4] 4259765375 ==  4259765375 OK
+
+4. prng_gauss DETERMINISM (seed=42, ziggurat + spare caching)
+--------------------------------------------------------------
+  [0] 1.23539566375601831e-01  ==  1.23539566375601831e-01  OK
+  [1] -1.23539566375601831e-01 ==  -1.23539566375601831e-01 OK (spare cache)
+  [2] 2.51780818630474812e+00  ==  2.51780818630474812e+00  OK
+  ... (all 10 match, spare caching preserved)
+
+5. INDEPENDENT STATE ISOLATION
+-------------------------------
+  a[0]=8.386e-02  b[0]=3.487e-01  a[1]=3.789e-01  b_reinit[0]=3.487e-01  OK
+  States a and b are fully independent.
+
+6. NO FILE-SCOPE STATICS IN prng.c
+------------------------------------
+All `static` items in prng.c are:
+  - static inline uint64_t rotl(...)         — helper function
+  - static uint64_t next_u64(PrngState*)     — helper function
+  - static uint64_t splitmix64(uint64_t*)    — helper function
+  - static const double ziggurat_x[256]      — const lookup table
+  - static const double ziggurat_f[256]      — const lookup table
+  - static const double ziggurat_fabsmin     — const value
+  - static double ziggurat_sample(PrngState*)— helper function
+ZERO mutable file-scope static variables.
+
+7. prng.h DOES NOT INCLUDE <omp.h>
+------------------------------------
+Confirmed: no #include <omp.h> in prng.h.
+
+8. BUILD SUCCESS
+-----------------
+cc -O3 -std=c11 -Wall -Wextra -pedantic -Iinclude -fopenmp src/main.c src/prng.c ...
+Only pre-existing warnings (unused variables, format truncation). Zero errors.
+
+RESULT: ALL CHECKS PASSED

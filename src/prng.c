@@ -1,111 +1,23 @@
-/*
- * ============================================================================
- * prng.c — Deterministic Pseudo-Random Number Generator (PRNG)
- * ============================================================================
- *
- * PURPOSE:
- *   This file provides a high-quality, deterministic random number generator
- *   that the simulator relies on for ALL randomness. That includes:
- *     - Picking which of the 64 constellation symbols to transmit
- *     - Generating Gaussian (bell-curve) noise added to signals
- *
- *   "Deterministic" means: if you give it the same starting seed number,
- *   it will always produce the EXACT SAME sequence of random numbers.
- *   This is critical for reproducibility — you can re-run a simulation
- *   with the same seed and get identical results, which is essential
- *   for debugging and scientific verification.
- *
- * CORE ALGORITHM — xoshiro256** (pronounced "zoh-SHEE-roh 256 star-star"):
- *   - This is one of the best-known non-cryptographic PRNGs in use today
- *   - It was designed by David Blackman and Sebastiano Vigna
- *   - It maintains 256 bits of internal state (four 64-bit numbers)
- *   - It has a period of 2^256 - 1, meaning it can produce that many numbers
- *     before repeating. This is an astronomically large number
- *   - It passes all major statistical randomness tests (BigCrush, PractRand)
- *   - It is very fast: roughly 10 CPU cycles per 64-bit random number
- *
- * SEEDING — SplitMix64:
- *   - The user provides a single 32-bit seed (like 42 or 12345)
- *   - But xoshiro256** needs 256 bits (four 64-bit words) of initial state
- *   - SplitMix64 is a simpler PRNG used ONLY during initialization to
- *     "expand" the 32-bit seed into four well-distributed 64-bit values
- *   - This ensures that even similar seeds (like 0 and 1) produce
- *     completely different random sequences
- *
- * RANDOM DISTRIBUTIONS PROVIDED:
- *   1. prng_uniform()  → Returns a random decimal number in [0.0, 1.0)
- *   2. prng_gauss()    → Returns a Gaussian (normal) random number with
- *                         mean=0 and standard deviation=1 (the "standard normal")
- *   3. prng_uint32()   → Returns a random 32-bit unsigned integer (0 to ~4 billion)
- *
- * THREAD SAFETY:
- *   This module uses file-scope static variables (global state).
- *   It is NOT thread-safe. If multiple threads call these functions
- *   simultaneously, the state will become corrupted. This is fine for
- *   this simulator, which runs single-threaded.
- *
- * ============================================================================
- */
-
 #include "prng.h"
+#include "math_utils.h"
 
-#include <math.h>
 #include <omp.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-#define MAX_OMP_THREADS 64
-
-typedef struct {
-    uint64_t s[4];
-    int have_spare_gauss;
-    double spare_gauss;
-} PrngThreadState;
-
-static PrngThreadState prng_threads[MAX_OMP_THREADS];
-static int prng_parallel_initialized = 0;
-
-static uint64_t s[4] = {
-    0x180ec6d33cfd0abaULL,
-    0xd5a61266f0c9392cULL,
-    0xa9582618e03fc9aaULL,
-    0x39abdc4529b1661cULL
-};
-
-static int have_spare_gauss = 0;
-static double spare_gauss = 0.0;
-
 
 static inline uint64_t rotl(const uint64_t x, int k) {
     return (x << k) | (x >> (64 - k));
 }
 
-static uint64_t next_u64(void) {
-    const uint64_t result = rotl(s[1] * 5, 7) * 9;
-    const uint64_t t = s[1] << 17;
-    s[2] ^= s[0];
-    s[3] ^= s[1];
-    s[1] ^= s[2];
-    s[0] ^= s[3];
-    s[2] ^= t;
-    s[3] = rotl(s[3], 45);
+static uint64_t next_u64(PrngState *st) {
+    const uint64_t result = rotl(st->s[1] * 5, 7) * 9;
+    const uint64_t t = st->s[1] << 17;
+    st->s[2] ^= st->s[0];
+    st->s[3] ^= st->s[1];
+    st->s[1] ^= st->s[2];
+    st->s[0] ^= st->s[3];
+    st->s[2] ^= t;
+    st->s[3] = rotl(st->s[3], 45);
     return result;
 }
-
-static uint64_t next_u64_state(uint64_t *st) {
-    const uint64_t result = rotl(st[1] * 5, 7) * 9;
-    const uint64_t t = st[1] << 17;
-    st[2] ^= st[0];
-    st[3] ^= st[1];
-    st[1] ^= st[2];
-    st[0] ^= st[3];
-    st[2] ^= t;
-    st[3] = rotl(st[3], 45);
-    return result;
-}
-
 
 static uint64_t splitmix64(uint64_t* x) {
     uint64_t z = (*x += 0x9e3779b97f4a7c15ULL);
@@ -114,32 +26,26 @@ static uint64_t splitmix64(uint64_t* x) {
     return z ^ (z >> 31);
 }
 
-void prng_seed(uint32_t seed) {
-    uint64_t state = (uint64_t)seed;
-    if (state == 0u) state = 1u;
-    s[0] = splitmix64(&state);
-    s[1] = splitmix64(&state);
-    s[2] = splitmix64(&state);
-    s[3] = splitmix64(&state);
-    have_spare_gauss = 0;
+void prng_init(PrngState *state, uint32_t seed) {
+    uint64_t mix = (uint64_t)seed;
+    if (mix == 0u) mix = 1u;
+    state->s[0] = splitmix64(&mix);
+    state->s[1] = splitmix64(&mix);
+    state->s[2] = splitmix64(&mix);
+    state->s[3] = splitmix64(&mix);
+    state->have_spare_gauss = 0;
+    state->spare_gauss = 0.0;
 }
 
-double prng_uniform(void) {
-    return (next_u64() >> 11) * 0x1.0p-53;
+double prng_uniform(PrngState *state) {
+    return (next_u64(state) >> 11) * 0x1.0p-53;
 }
 
-static double prng_uniform_state(uint64_t *st) {
-    return (next_u64_state(st) >> 11) * 0x1.0p-53;
+uint32_t prng_uint32(PrngState *state) {
+    return (uint32_t)(next_u64(state) >> 32);
 }
 
-uint32_t prng_uint32(void) {
-    return (uint32_t)(next_u64() >> 32);
-}
-
-static uint32_t prng_uint32_state(uint64_t *st) {
-    return (uint32_t)(next_u64_state(st) >> 32);
-}
-
+/* Ziggurat tables — compile-time constants, not mutable state */
 
 #define ZIG_N 256
 #define ZIG_K 7.273554360975853
@@ -220,56 +126,54 @@ static const double ziggurat_f[ZIG_N] = {
 
 static const double ziggurat_fabsmin = 9.1838303002622427e-03;
 
-static double ziggurat_sample(uint64_t *st, int *have_spare, double *spare) {
-    if (*have_spare) {
-        *have_spare = 0;
-        return *spare;
+static double ziggurat_sample(PrngState *st) {
+    if (st->have_spare_gauss) {
+        st->have_spare_gauss = 0;
+        return st->spare_gauss;
     }
     while (1) {
-        unsigned int ui = prng_uint32_state(st);
+        unsigned int ui = prng_uint32(st);
         int i = (int)(ui & 0xFF);
-        double x = prng_uniform_state(st) * ziggurat_x[i];
-        double y = prng_uniform_state(st) * ziggurat_f[i];
+        double x = prng_uniform(st) * ziggurat_x[i];
+        double y = prng_uniform(st) * ziggurat_f[i];
         if (i != 0) {
             if (y < ziggurat_f[i + 1] + (ziggurat_f[i] - ziggurat_f[i + 1]) * x / ziggurat_x[i]) {
-                *spare = (ui & 0x200) ? -x : x;
-                *have_spare = 1;
+                st->spare_gauss = (ui & 0x200) ? -x : x;
+                st->have_spare_gauss = 1;
                 return x;
             }
         } else {
             if (y < ziggurat_fabsmin * exp(-0.5 * x * x)) {
-                *spare = (ui & 0x200) ? -x : x;
-                *have_spare = 1;
+                st->spare_gauss = (ui & 0x200) ? -x : x;
+                st->have_spare_gauss = 1;
                 return x;
             }
         }
     }
 }
 
-double prng_gauss(void) {
-    return ziggurat_sample(s, &have_spare_gauss, &spare_gauss);
+double prng_gauss(PrngState *state) {
+    return ziggurat_sample(state);
 }
 
-void prng_init_parallel(uint32_t seed) {
-    uint64_t state = (uint64_t)seed;
-    if (state == 0u) state = 1u;
+void prng_init_parallel(PrngState *thread_states, uint32_t seed) {
+    uint64_t mix = (uint64_t)seed;
+    if (mix == 0u) mix = 1u;
 
     int nthreads = omp_get_max_threads();
-    if (nthreads > MAX_OMP_THREADS) nthreads = MAX_OMP_THREADS;
+    if (nthreads > PRNG_MAX_OMP_THREADS) nthreads = PRNG_MAX_OMP_THREADS;
 
     for (int t = 0; t < nthreads; t++) {
-        prng_threads[t].s[0] = splitmix64(&state);
-        prng_threads[t].s[1] = splitmix64(&state);
-        prng_threads[t].s[2] = splitmix64(&state);
-        prng_threads[t].s[3] = splitmix64(&state);
-        prng_threads[t].have_spare_gauss = 0;
-        prng_threads[t].spare_gauss = 0.0;
+        thread_states[t].s[0] = splitmix64(&mix);
+        thread_states[t].s[1] = splitmix64(&mix);
+        thread_states[t].s[2] = splitmix64(&mix);
+        thread_states[t].s[3] = splitmix64(&mix);
+        thread_states[t].have_spare_gauss = 0;
+        thread_states[t].spare_gauss = 0.0;
     }
-    prng_parallel_initialized = 1;
 }
 
-double prng_gauss_parallel(void) {
+double prng_gauss_parallel(PrngState *thread_states) {
     int tid = omp_get_thread_num();
-    PrngThreadState *ts = &prng_threads[tid];
-    return ziggurat_sample(ts->s, &ts->have_spare_gauss, &ts->spare_gauss);
+    return ziggurat_sample(&thread_states[tid]);
 }

@@ -29,6 +29,8 @@
 #ifndef PHASE_NOISE_H
 #define PHASE_NOISE_H
 
+#include "prng.h"
+
 /**
  * @brief Configuration for phase noise generation.
  *
@@ -93,9 +95,10 @@ int phase_noise_init(PhaseNoiseConfig* cfg);
  * in radians RMS.
  *
  * @param cfg Initialized configuration (state fields are updated).
+ * @param prng PRNG state for Gaussian white noise generation.
  * @return Phase noise sample in radians.
  */
-double phase_noise_generate(PhaseNoiseConfig* cfg);
+double phase_noise_generate(PhaseNoiseConfig* cfg, PrngState* prng);
 
 /**
  * @brief Release resources held by the phase noise generator.

@@ -30,19 +30,11 @@
  */
 
 #include "flicker_noise.h"
+#include "math_utils.h"
 #include "prng.h"
 
-#include <math.h>
 #include <stdio.h>
 #include <string.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
-
-#ifndef M_LN2
-#define M_LN2 0.69314718055994530942
-#endif
 
 int flicker_noise_init(FlickerNoiseConfig* cfg) {
     if (!cfg) {
@@ -99,7 +91,7 @@ int flicker_noise_init(FlickerNoiseConfig* cfg) {
     return 0;
 }
 
-double flicker_noise_generate(FlickerNoiseConfig* cfg) {
+double flicker_noise_generate(FlickerNoiseConfig* cfg, PrngState* prng) {
     cfg->sample_count++;
 
     for (int k = 0; k < cfg->num_octaves; k++) {
@@ -107,7 +99,7 @@ double flicker_noise_generate(FlickerNoiseConfig* cfg) {
 
         if (cfg->update_counters[k] >= cfg->update_intervals[k]) {
             cfg->running_sum -= cfg->accumulators[k];
-            cfg->accumulators[k] = prng_gauss();
+            cfg->accumulators[k] = prng_gauss(prng);
             cfg->running_sum += cfg->accumulators[k];
 
             cfg->update_counters[k] = 0;

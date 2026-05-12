@@ -1,0 +1,49 @@
+Task 11 — Signal Chain Module Extraction
+=========================================
+
+Files Created:
+  include/signal_chain.h — Public API declarations
+  src/signal_chain.c     — Implementation
+  test_signal_chain.c    — Standalone QA test
+
+Functions Extracted:
+  apply_stage_complex()    — Complex baseband stage processor (Friis noise)
+  apply_stage_realistic()  — Real RF stage processor (with BW correction)
+  compute_metric_complex() — SNR/EVM measurement for complex signals
+  compute_metric_real()    — SNR measurement for real signals
+  mean_power_complex()     — Mean |x|² for Complex arrays
+  mean_noise_power_complex() — MSE between sig and ref (Complex)
+  mean_power_real()        — Mean x² for real arrays
+  mean_noise_power_real()  — MSE between sig and ref (real)
+
+Reentrant PRNG:
+  - Both apply_stage_* functions accept PrngState* as last parameter
+  - Internal helpers add_awgn_complex_re / add_awgn_real_re use prng_gauss(rng)
+  - No global PRNG state referenced
+
+Signal Formulas Preserved:
+  - Friis: pn_add = N_t0_v2 × g_lin × (F - 1)
+  - RF BW correction: pn_add *= fs_hz / (2 × B_NOISE_HZ)
+  - Voltage gain: amp_gain = sqrt(10^(gain_db/10))
+  - IP3 compression: scale = 1 - (1/3)(p_in/iip3_v2), clamped at 0.9
+  - P1dB compression: if p_in > ip1db_v2 × 0.794, scale = sqrt(ip1db_v2/p_in)
+
+Compile Test:
+  gcc -std=c11 -Wall -Wextra -pedantic -fopenmp -Iinclude ...
+  Result: 0 warnings, 0 errors
+
+QA Results:
+  apply_stage_complex (20 dB gain, 3 dB NF):
+    Gain_total = 100.0 (expected 100.0) — PASS
+    Noise power = 2.43e-09 (> 0) — PASS (noise injected)
+    SNR = 117.96 dB (Friis analytic) — PASS
+
+  apply_stage_realistic (10 dB gain, 5 dB NF, fs=96 GHz):
+    Gain_total = 10.0 (expected 10.0) — PASS
+    Noise power = 1.34e-07 (> 0) — PASS (noise injected)
+    EVM = NaN (expected for real signals) — PASS
+
+Linker Note:
+  main.c still has static versions of these functions. The new module
+  compiles independently. When main.c is updated to include signal_chain.h
+  and remove its static copies, the linker will use the module versions.

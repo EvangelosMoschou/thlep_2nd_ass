@@ -1,0 +1,24 @@
+=== Task 5: CMake Build Evidence ===
+Date: 2026-05-12
+
+--- cmake -B build -DCMAKE_BUILD_TYPE=Release ---
+Output: Configuring done, Generating done
+Build files written to: build/
+
+--- cmake --build build ---
+Status: SUCCESS (0)
+Warnings: pre-existing source warnings only
+
+--- Binary ---
+Path: bin/dual_receiver_sim
+Size: 129320 bytes
+
+--- Library dependencies (ldd) ---
+linux-vdso.so.1
+libm.so.6
+libgomp.so.1
+libc.so.6
+/lib64/ld-linux-x86-64.so.2
+
+Notes: -static-libgcc effective (no libgcc_s dependency).
+       libgomp is expected (OpenMP runtime).

@@ -1,0 +1,36 @@
+=== Task 9 — CLI args module (cli_args.c/h) QA Evidence ===
+Date: 2026-05-12
+
+=== Test 1: Full flag set ===
+Command: --seed 42 --symbols 1000 --snr 15.0 --stage-csv dummy.csv --topology-sim 1
+Result:  ret=0 seed=42 symbols=1000 snr=15.0 csv=dummy.csv topo=1  => PASS
+
+=== Test 2: Defaults ===
+Result:  ret=0 symbols=3000 snr=20.0 csv=stage_models/runtime_stage_models_target16.csv topo=1 bb=0 rf=1 real=1  => PASS
+
+=== Test 3: --stage-sim alias + symbol-rate, rf-fs, carrier ===
+Command: --stage-sim 1 --symbol-rate 5e6 --rf-fs 4.8e10 --carrier 1.2e10
+Result:  ret=0 topo=1 rate=5e6 rf_fs=4.8e10 carrier=1.2e10  => PASS
+  Precise: symbol_rate_hz==5e6 => PASS
+  Precise: rf_sample_rate_hz==4.8e10 => PASS
+  Precise: carrier_hz==1.2e10 => PASS
+
+=== Test 4: Toggles (--disable-bb, --enable-rf, --enable-realistic) ===
+Result:  ret=0 bb=0 rf=1 real=1  => PASS
+
+=== Test 5: Unknown flag => return 1 ===
+Result:  ret=1  => PASS
+
+=== Test 6: Invalid numeric => return 2 ===
+Result:  ret=2  => PASS
+
+=== Files created ===
+include/cli_args.h — CliArgs struct, parse_cli_args(), cli_print_usage()
+src/cli_args.c    — Extracted parsing logic (parse_u32, parse_i32, parse_double, parse_cli_args, cli_print_usage)
+
+=== Flags preserved ===
+--seed, --symbols, --symbol-rate, --rf-fs, --carrier, --snr, --stage-csv,
+--topology-sim, --stage-sim (alias), --disable-bb, --enable-rf, --enable-realistic
+
+=== Verification ===
+ALL TESTS PASSED

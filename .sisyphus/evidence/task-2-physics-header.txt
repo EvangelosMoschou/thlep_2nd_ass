@@ -1,0 +1,24 @@
+Task: Create include/physics.h with centralized physical constants
+Date: 2026-05-12
+
+=== Verification Output ===
+$ gcc -std=c11 -Iinclude /tmp/test_physics.c -o /tmp/test_physics -lm && /tmp/test_physics
+
+K_BOLTZMANN = 1.3806490000000001e-23
+B_NOISE_HZ  = 2.0e+08
+R_LOAD_OHM  = 50.0
+
+ALL CHECKS PASSED
+
+=== Constants defined in include/physics.h ===
+- K_BOLTZMANN = 1.380649e-23   (Boltzmann constant, J/K)
+- B_NOISE_HZ  = 200.0e6         (Noise bandwidth, Hz)
+- R_LOAD_OHM  = 50.0            (System impedance, Ω)
+
+=== Header guard ===
+#ifndef PHYSICS_H / #define PHYSICS_H / #endif
+
+=== Source of truth ===
+- K_BOLTZMANN: src/main.c:120
+- B_NOISE_HZ:  src/main.c:129
+- R_LOAD_OHM:  src/main.c:130

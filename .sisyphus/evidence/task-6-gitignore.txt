@@ -1,0 +1,29 @@
+Task 6: Update .gitignore for CMake build artifacts
+====================================================
+Date: 2026-05-12
+
+Changes made to .gitignore:
+- Added build/ (CMake build output directory)
+- Changed bin/ to bin/* and added !bin/dual_receiver_sim (so binary is trackable)
+- Kept all existing entries (*.o, *.a, *.so, out/, etc.)
+
+Verification Results:
+---------------------
+
+1. cmake build completed:
+   $ cmake -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build
+   [100%] Built target dual_receiver_sim
+
+2. Git status after build:
+ M .gitignore
+?? .sisyphus/
+?? CMakeLists.txt
+?? bin/
+?? include/math_utils.h
+?? include/physics.h
+
+3. Pattern verification:
+   build/ ignored: .gitignore:2:build/	build/
+   bin/dual_receiver_sim ignored: .gitignore:4:!bin/dual_receiver_sim	bin/dual_receiver_sim
+   *.o ignored: .gitignore:5:*.o	src/main.c.o
+   out/ ignored: .gitignore:10:out/	out/
