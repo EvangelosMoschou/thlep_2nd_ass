@@ -47,456 +47,229 @@
  * ============================================================================
  */
 
-#include "prng.h"   /* Public interface: prng_seed, prng_uniform, prng_gauss, prng_uint32 */
+#include "prng.h"
 
-#include <math.h>   /* For sqrt(), log(), cos(), sin() — used in Box-Muller transform */
+#include <math.h>
+#include <omp.h>
 
-/*
- * M_PI might not be defined on all compilers/platforms (it's not part of the
- * C standard, only POSIX). So we define it ourselves if it's missing.
- * M_PI = π = 3.14159... — the ratio of a circle's circumference to its diameter.
- */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
 
-/*
- * ============================================================================
- * INTERNAL STATE
- * ============================================================================
- *
- * s[4] — The four 64-bit words that make up the xoshiro256** state.
- *
- * These are initialized with arbitrary non-zero default values (shown below).
- * These defaults will be overwritten by prng_seed() before the simulation
- * actually starts. The defaults are only here to prevent an all-zero state
- * if someone accidentally calls prng_uniform() before prng_seed().
- *
- * An all-zero state is catastrophic for xoshiro256** because:
- *   XOR of zero with zero is always zero → the generator would be stuck
- *   producing 0 forever.
- */
+#define MAX_OMP_THREADS 64
+
+typedef struct {
+    uint64_t s[4];
+    int have_spare_gauss;
+    double spare_gauss;
+} PrngThreadState;
+
+static PrngThreadState prng_threads[MAX_OMP_THREADS];
+static int prng_parallel_initialized = 0;
+
 static uint64_t s[4] = {
-    0x180ec6d33cfd0abaULL,   /* Default state word 0 — arbitrary non-zero constant */
-    0xd5a61266f0c9392cULL,   /* Default state word 1 — arbitrary non-zero constant */
-    0xa9582618e03fc9aaULL,   /* Default state word 2 — arbitrary non-zero constant */
-    0x39abdc4529b1661cULL    /* Default state word 3 — arbitrary non-zero constant */
+    0x180ec6d33cfd0abaULL,
+    0xd5a61266f0c9392cULL,
+    0xa9582618e03fc9aaULL,
+    0x39abdc4529b1661cULL
 };
 
-/*
- * Box-Muller Gaussian cache variables:
- *
- * The Box-Muller transform (used in prng_gauss) converts two independent
- * uniform random numbers into two independent Gaussian random numbers.
- * Since we only need to return one at a time, we cache the second one
- * and return it on the next call. This effectively halves the cost.
- *
- * have_spare_gauss: 1 if spare_gauss contains a valid cached sample, 0 otherwise
- * spare_gauss:      the cached Gaussian sample from the previous Box-Muller call
- */
 static int have_spare_gauss = 0;
 static double spare_gauss = 0.0;
 
 
-/* ============================================================================
- * INTERNAL HELPER FUNCTIONS
- * ============================================================================ */
-
-/*
- * rotl — Bitwise Rotate Left
- *
- * What it does:
- *   Takes a 64-bit number and rotates its bits to the left by k positions.
- *   Bits that "fall off" the left end wrap around to the right end.
- *
- * Why it's needed:
- *   This is a fundamental building block of the xoshiro256** algorithm.
- *   Rotation mixes bits efficiently — it's faster than multiplication on
- *   many CPUs and creates complex bit-level dependencies that make the
- *   output appear random.
- *
- * Example:
- *   If x = 0b10110001 (8-bit for illustration) and k = 3:
- *   Result = 0b10001101 (the top 3 bits wrapped to the bottom)
- *
- * Parameters:
- *   x — the 64-bit value to rotate
- *   k — how many bit positions to rotate left (0 ≤ k < 64)
- *
- * Returns:
- *   The rotated 64-bit value
- *
- * Note: "static inline" means this function is private to this file
- * and the compiler should try to embed its code directly at each call site
- * (avoiding the overhead of a function call).
- */
 static inline uint64_t rotl(const uint64_t x, int k) {
-    /*
-     * (x << k)          — shift left by k: bits move up, zeros fill from below
-     * (x >> (64 - k))   — shift right by (64-k): captures the bits that
-     *                      would have been lost by the left shift
-     * OR them together  — combine to create the rotation effect
-     */
     return (x << k) | (x >> (64 - k));
 }
 
-
-/*
- * next_u64 — Generate the next 64-bit pseudo-random number from xoshiro256**
- *
- * What it does:
- *   1. Computes the OUTPUT from the current state using a "scrambler":
- *      result = rotl(s[1] * 5, 7) * 9
- *      This specific formula (multiply by 5, rotate by 7, multiply by 9)
- *      is what makes this the "**" (starstar) variant of xoshiro256.
- *      It produces better statistical properties than the simpler variants.
- *
- *   2. Updates the 4-word state using XOR and shift operations:
- *      - These operations ensure that every state word influences every
- *        other state word over time, creating long-range correlations
- *        that make the output hard to predict.
- *      - The specific constants (shift of 17, rotation of 45) were chosen
- *        by the algorithm authors to maximize the period and quality.
- *
- * Why it's needed:
- *   This is the core of the PRNG. Every time we need a random number
- *   (for noise, for symbol selection, etc.), this function is called
- *   to advance the state and produce the next output.
- *
- * Returns:
- *   A 64-bit pseudo-random unsigned integer (all values 0..2^64-1 are possible)
- *
- * Period:
- *   2^256 - 1 (the generator cycles through this many states before repeating)
- */
 static uint64_t next_u64(void) {
-    /*
-     * STEP 1: Compute the output value (scrambler).
-     *
-     * Take state word s[1], multiply by 5, rotate left by 7, then multiply by 9.
-     * This scrambling operation maps the internal state to an output that has
-     * better statistical properties than the raw state bits.
-     *
-     * Why s[1] and not s[0]?  The algorithm authors tested all combinations
-     * and found s[1] gives the best results with these multiplier/rotation values.
-     */
     const uint64_t result = rotl(s[1] * 5, 7) * 9;
-
-    /*
-     * STEP 2: Advance the state.
-     *
-     * t is a temporary value derived from s[1] shifted left by 17 bits.
-     * This value will be XOR'd into s[2] near the end to mix state bits.
-     */
     const uint64_t t = s[1] << 17;
-
-    /*
-     * STEP 3: Cross-mix all four state words via XOR operations.
-     *
-     * The order of these operations matters! Each line depends on the
-     * previous state, and together they form a linear recurrence over GF(2)
-     * (the field with two elements, 0 and 1 — basically binary arithmetic).
-     *
-     * s[2] ^= s[0] : Mix word 0 into word 2
-     * s[3] ^= s[1] : Mix word 1 into word 3
-     * s[1] ^= s[2] : Now word 2 has been updated, mix it back into word 1
-     * s[0] ^= s[3] : Now word 3 has been updated, mix it back into word 0
-     *
-     * After these four XOR operations, every state word has been influenced
-     * by at least one other word, creating the "avalanche effect" where
-     * a single bit change propagates to affect many output bits.
-     */
     s[2] ^= s[0];
     s[3] ^= s[1];
     s[1] ^= s[2];
     s[0] ^= s[3];
-
-    /*
-     * STEP 4: Apply the shift and rotation to complete the state update.
-     *
-     * s[2] ^= t      : XOR in the shifted value of the old s[1]
-     * s[3] = rotl(45) : Rotate word 3 by 45 positions to break any
-     *                    linear patterns that might form over many iterations
-     */
     s[2] ^= t;
     s[3] = rotl(s[3], 45);
+    return result;
+}
 
+static uint64_t next_u64_state(uint64_t *st) {
+    const uint64_t result = rotl(st[1] * 5, 7) * 9;
+    const uint64_t t = st[1] << 17;
+    st[2] ^= st[0];
+    st[3] ^= st[1];
+    st[1] ^= st[2];
+    st[0] ^= st[3];
+    st[2] ^= t;
+    st[3] = rotl(st[3], 45);
     return result;
 }
 
 
-/*
- * splitmix64 — Seeding helper that maps one 64-bit value to a well-distributed 64-bit hash
- *
- * What it does:
- *   Given a state variable (modified in-place), it:
- *   1. Adds the golden-ratio-derived constant 0x9e3779b97f4a7c15 to the state
- *      (this constant = floor(2^64 / φ) where φ = (1+√5)/2 is the golden ratio)
- *   2. Applies a series of XOR-shift and multiply operations that thoroughly
- *      "hash" the bits — even if the input changes by just 1 bit, the output
- *      will change dramatically (this is called the "avalanche" property)
- *
- * Why it's needed:
- *   When the user provides a small seed like 42, we need to convert it into
- *   four 64-bit state words that are wildly different from each other.
- *   SplitMix64 is called 4 times in sequence to produce s[0], s[1], s[2], s[3].
- *   Each call advances the internal counter and produces a new hash, so even
- *   though all 4 calls start from the same seed, they produce 4 different values.
- *
- * Parameters:
- *   x — pointer to the SplitMix64 state variable (read AND modified)
- *       On input: current counter value
- *       On output: counter advanced by one step
- *
- * Returns:
- *   A 64-bit pseudo-random value derived from the advanced counter
- *
- * Note: SplitMix64 was designed by Sebastiano Vigna. It's a simple but
- *       high-quality hash function specifically made for PRNG seeding.
- */
 static uint64_t splitmix64(uint64_t* x) {
-    /*
-     * Step 1: Advance the counter by the golden-ratio constant.
-     * The += modifies *x in place, and the new value is also stored in z.
-     * This is written as a single expression: z = (*x += constant).
-     */
     uint64_t z = (*x += 0x9e3779b97f4a7c15ULL);
-
-    /*
-     * Steps 2-4: Three rounds of XOR-shift-multiply hashing.
-     * Each round:
-     *   1. XOR z with itself shifted right (mixes high bits into low bits)
-     *   2. Multiply by a large odd constant (creates complex bit dependencies)
-     *
-     * The specific shift amounts (30, 27, 31) and multiplier constants
-     * were found by automated search to minimize statistical bias.
-     */
-    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;   /* Round 1: shift 30, multiply */
-    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;   /* Round 2: shift 27, multiply */
-    return z ^ (z >> 31);                            /* Round 3: final XOR-shift   */
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+    return z ^ (z >> 31);
 }
 
-
-/* ============================================================================
- * PUBLIC API FUNCTIONS
- * ============================================================================ */
-
-/*
- * prng_seed — Initialize the PRNG with a user-provided 32-bit seed
- *
- * What it does:
- *   1. Takes the 32-bit seed and widens it to 64 bits (just zero-extends it)
- *   2. If the widened value is 0, changes it to 1 to prevent an all-zero state
- *      (an all-zero state would cause xoshiro256** to produce zeros forever)
- *   3. Calls splitmix64 four times to generate four well-distributed 64-bit
- *      values, which become the initial state of the xoshiro256** generator
- *   4. Resets the Gaussian cache (have_spare_gauss = 0) so that prng_gauss()
- *      doesn't return a stale cached value from a previous seed's sequence
- *
- * When to call:
- *   Call this ONCE at the start of the program, before any calls to
- *   prng_uniform(), prng_gauss(), or prng_uint32().
- *
- * Parameters:
- *   seed — any 32-bit value (0 through 4,294,967,295). The value 0 is
- *          automatically mapped to 1 internally, so all 32-bit values are valid.
- *
- * Determinism guarantee:
- *   Calling prng_seed(42) will ALWAYS set the same internal state,
- *   so subsequent calls to prng_uniform() etc. will produce the
- *   identical sequence of numbers every time.
- */
 void prng_seed(uint32_t seed) {
-    /* Widen the 32-bit seed to 64 bits. The upper 32 bits become zero. */
     uint64_t state = (uint64_t)seed;
-
-    /* Protect against the all-zero state, which would make xoshiro stuck. */
-    if (state == 0u) {
-        state = 1u;
-    }
-
-    /*
-     * Generate four 64-bit state words from the single seed.
-     * Each call to splitmix64 advances `state` and returns a new hash.
-     * After this, s[0..3] are initialized and ready for next_u64() calls.
-     */
+    if (state == 0u) state = 1u;
     s[0] = splitmix64(&state);
     s[1] = splitmix64(&state);
     s[2] = splitmix64(&state);
     s[3] = splitmix64(&state);
-
-    /*
-     * Reset the Gaussian cache. This is important because:
-     * - If prng_gauss() was called under a previous seed, it may have
-     *   cached a "spare" sample that belongs to the OLD sequence.
-     * - After re-seeding, we must discard that stale sample.
-     */
     have_spare_gauss = 0;
 }
 
-
-/*
- * prng_uniform — Generate a uniformly distributed random floating-point number in [0, 1)
- *
- * What it does:
- *   1. Calls next_u64() to get a fresh 64-bit random integer
- *   2. Right-shifts by 11 to keep only the upper 53 bits
- *   3. Multiplies by 2^(-53) to convert the 53-bit integer to a double
- *      in the range [0.0, 1.0)
- *
- * Why 53 bits?
- *   IEEE 754 double-precision floating-point numbers have a 52-bit mantissa
- *   (plus one implicit leading 1-bit), so 53 bits is the maximum precision.
- *   Using more bits would be wasted; using fewer would leave gaps in the
- *   distribution.
- *
- * What does [0, 1) mean?
- *   The result can be exactly 0.0, but it can NEVER be exactly 1.0.
- *   The largest possible value is 1.0 - 2^(-53) ≈ 0.999999999999999889.
- *   This is important for algorithms like Box-Muller that use log(u1) —
- *   log(0) is -infinity and log(1) is 0, and we want to avoid both extremes.
- *
- * Returns:
- *   A double-precision floating-point value uniformly distributed in [0.0, 1.0)
- *
- * Usage:
- *   double r = prng_uniform();  // r is a random number like 0.73821...
- */
 double prng_uniform(void) {
-    /*
-     * (next_u64() >> 11)  — discard the lower 11 bits, keeping 53 random bits
-     * 0x1.0p-53           — this is the C99 hexadecimal float literal for 2^(-53)
-     *                        = 1.1102230246251565e-16
-     * Multiplying a 53-bit integer by 2^(-53) gives a value in [0, 1)
-     */
     return (next_u64() >> 11) * 0x1.0p-53;
 }
 
+static double prng_uniform_state(uint64_t *st) {
+    return (next_u64_state(st) >> 11) * 0x1.0p-53;
+}
 
-/*
- * prng_gauss — Generate a standard normal (Gaussian) random variate N(0, 1)
- *
- * What it does:
- *   Uses the Box-Muller transform to convert two uniform random numbers
- *   into two independent standard normal random numbers.
- *
- * Background — What is a Gaussian/Normal distribution?
- *   A Gaussian distribution is the classic "bell curve". A standard normal
- *   distribution has:
- *     - Mean (center) = 0
- *     - Standard deviation (spread) = 1
- *   About 68% of values fall within ±1, 95% within ±2, 99.7% within ±3.
- *
- * The Box-Muller Algorithm:
- *   Given two independent uniform random numbers u1, u2 in (0, 1):
- *     magnitude = sqrt(-2 * ln(u1))         — "how far from the center"
- *     angle     = 2π * u2                    — "in which direction"
- *     sample1   = magnitude * cos(angle)     — first Gaussian sample
- *     sample2   = magnitude * sin(angle)     — second Gaussian sample
- *
- *   Both sample1 and sample2 are independent N(0,1) random variables.
- *   We return sample1 immediately and cache sample2 for the next call.
- *   This means on average we only need one uniform draw per Gaussian sample.
- *
- * Why we need Gaussian noise in this simulator:
- *   Real communication channels add thermal noise that follows a Gaussian
- *   distribution (by the Central Limit Theorem). AWGN (Additive White Gaussian
- *   Noise) is the standard model for this. Each noise sample is drawn from
- *   N(0, σ) where σ depends on the desired noise power.
- *
- * Edge case handling:
- *   - u1 = 0 would cause log(0) = -infinity, crashing the program.
- *     We clamp u1 to a minimum of 1e-15 to prevent this.
- *   - u1 very close to 0 would produce an extremely large Gaussian sample
- *     (like 8 or 9 standard deviations). This is fine — real Gaussians
- *     can produce extreme values too.
- *
- * Returns:
- *   A double sampled from the standard normal distribution N(0, 1).
- *   Typical values range from about -4 to +4, with most between -2 and +2.
- */
-double prng_gauss(void) {
-    double u1;     /* First uniform random sample — controls the magnitude */
-    double u2;     /* Second uniform random sample — controls the angle */
-    double mag;    /* Magnitude = sqrt(-2 * ln(u1)) */
-    double phase;  /* Phase angle = 2π * u2 */
+uint32_t prng_uint32(void) {
+    return (uint32_t)(next_u64() >> 32);
+}
 
-    /*
-     * CACHING LOGIC:
-     * Check if we have a cached ("spare") Gaussian sample from the previous call.
-     * The Box-Muller transform produces TWO samples at once, but we can only
-     * return one. So on even-numbered calls, we compute both and cache one.
-     * On odd-numbered calls, we just return the cached one — no computation needed!
-     */
-    if (have_spare_gauss) {
-        have_spare_gauss = 0;   /* Mark the cache as empty */
-        return spare_gauss;     /* Return the previously cached sample */
-    }
-
-    /* --- No cached sample available; compute a fresh pair --- */
-
-    /* Draw two independent uniform random samples from [0, 1) */
-    u1 = prng_uniform();
-    if (u1 < 1e-15) {
-        u1 = 1e-15; /* Clamp to prevent log(0) = -infinity */
-    }
-    u2 = prng_uniform();
-
-    /*
-     * Box-Muller transform:
-     *
-     *   mag   = sqrt(-2 * ln(u1))
-     *         The logarithm creates an exponential distribution, and the
-     *         square root converts it to a Rayleigh distribution — which is
-     *         the distribution of the distance from the origin in 2D Gaussian noise.
-     *
-     *   phase = 2π * u2
-     *         A uniform angle in [0, 2π) — this picks a random direction
-     *         on the unit circle.
-     *
-     * Together, (mag, phase) define a point in polar coordinates whose
-     * Cartesian components (mag*cos, mag*sin) are two independent N(0,1) samples.
-     */
-    mag   = sqrt(-2.0 * log(u1));
-    phase = 2.0 * M_PI * u2;
-
-    /*
-     * Produce TWO independent Gaussian samples:
-     *   spare_gauss = mag * sin(phase)  — cache this for the next call
-     *   return        mag * cos(phase)  — return this one now
-     */
-    spare_gauss      = mag * sin(phase);
-    have_spare_gauss = 1;          /* Flag that the cache is valid */
-    return mag * cos(phase);       /* Return the first Gaussian sample */
+static uint32_t prng_uint32_state(uint64_t *st) {
+    return (uint32_t)(next_u64_state(st) >> 32);
 }
 
 
-/*
- * prng_uint32 — Generate a uniformly distributed random 32-bit unsigned integer
- *
- * What it does:
- *   Calls next_u64() to get a 64-bit random number, then extracts the upper
- *   32 bits by right-shifting 32 positions. The upper bits of xoshiro256**
- *   have slightly better statistical properties than the lower bits.
- *
- * Usage in this simulator:
- *   Used for selecting random constellation symbol indices:
- *     idx = prng_uint32() % 64;   // pick one of 64 APSK symbols
- *   The modulo operation maps the random 32-bit value to the range [0, 63].
- *
- * Bias note:
- *   Modulo by 64 (a power of 2) introduces ZERO bias because 2^32 is
- *   exactly divisible by 64. For non-power-of-2 moduli, there would be
- *   a tiny bias, but it's negligible for simulation purposes.
- *
- * Returns:
- *   A 32-bit unsigned integer uniformly distributed over [0, 2^32 - 1]
- *   (i.e., from 0 to 4,294,967,295 inclusive).
- */
-uint32_t prng_uint32(void) {
-    /*
-     * (next_u64() >> 32) — take the upper 32 bits of the 64-bit output.
-     * Cast to uint32_t — narrow from 64 bits to 32 bits (discards upper zeros).
-     */
-    return (uint32_t)(next_u64() >> 32);
+#define ZIG_N 256
+#define ZIG_K 7.273554360975853
+
+static const double ziggurat_x[ZIG_N] = {
+    3.9646979206058828e+00, 3.4867393982391743e+00, 3.1656189721379859e+00,
+    2.9204368760874883e+00, 2.7195830053763579e+00, 2.5478056643704297e+00,
+    2.3961839568055272e+00, 2.2592767705436925e+00, 2.1338065919226661e+00,
+    2.0181925990161927e+00, 1.9112899891509811e+00, 1.8121514921606007e+00,
+    1.7200574334054360e+00, 1.6344399120123558e+00, 1.5547538382709508e+00,
+    1.4804862792004019e+00, 1.4111629640884028e+00, 1.3463437816359489e+00,
+    1.2856264539241872e+00, 1.2286422319691539e+00, 1.1750598226911691e+00,
+    1.1245789338593914e+00, 1.0769321574883506e+00, 1.0318862132602321e+00,
+    0.98923893146087059, 0.94850988069230739, 0.90955087394046136,
+    0.87222168954091788, 0.83639040733079929, 0.80193219435518635,
+    0.76872799000583919, 0.73666403543781714, 0.70563139529278637,
+    0.67552542646760243, 0.64624530969741056, 0.61769356097852134,
+    0.58977554929547579, 0.56239909346062284, 0.53547409235480640,
+    0.50891221489048910, 0.48262662763740037, 0.45653172777111485,
+    0.43054288365840722, 0.40457624380240548, 0.37854854296091668,
+    0.35237693085292770, 0.32597890301562108, 0.29927214753069132,
+    0.27217439549591668, 0.24460334178992035, 0.21647656964540771,
+    0.18771147646755927, 0.15822520490153592, 0.12793461253164632,
+    0.096756017322175730, 0.064605083896961696, 0.031397005267994567,
+    0.00000000000000000,
+};
+
+static const double ziggurat_f[ZIG_N] = {
+    1.6671631788860967e-03, 3.0321373872519737e-03, 4.6645646430894051e-03,
+    6.4799199102605646e-03, 8.4266106026373838e-03, 1.0479389809449384e-02,
+    1.2677725203482698e-02, 1.4998208956354299e-02, 1.7424020464071958e-02,
+    1.9946924796058357e-02, 2.2558961602053807e-02, 2.5252641636806918e-02,
+    2.8021005560164035e-02, 3.0857673834859013e-02, 3.3756798122806915e-02,
+    3.6713099312523988e-02, 3.9721797038098171e-02, 4.2778642104352941e-02,
+    4.5879843946174319e-02, 4.9022091957890850e-02, 5.2202480642816505e-02,
+    5.5418527035903370e-02, 5.8668187697709399e-02, 6.1949774650719897e-02,
+    6.5261960649753156e-02, 6.8603782292309563e-02, 7.1974641703614609e-02,
+    7.5374215835851067e-02, 7.8802463467150073e-02, 8.2259629866934790e-02,
+    8.5746248824670864e-02, 8.9263142708601187e-02, 9.2811420459372183e-02,
+    9.6392484702836961e-02, 1.0000793307751938e-01, 1.0366505864536175e-01,
+    1.0736494794364829e-01, 1.1110883232609497e-01, 1.1489789925493789e-01,
+    1.1873328914156051e-01, 1.2261608936901607e-01, 1.2654732676088870e-01,
+    1.3052795027020893e-01, 1.3455882309273615e-01, 1.3864070534476622e-01,
+    1.4277433668021295e-01, 1.4696032757934492e-01, 1.5119914124628609e-01,
+    1.5549118496903942e-01, 1.5983680225919562e-01, 1.6423626305934348e-01,
+    1.6868975636086310e-01, 1.7319738341445853e-01, 1.7775915018334608e-01,
+    1.8237495862054827e-01, 1.8704459836904103e-01, 1.9176773949313332e-01,
+    1.9654392415642093e-01, 2.0137255817714469e-01, 2.0625290382102955e-01,
+    2.1118407134706059e-01, 2.1616501355134694e-01, 2.2119451769018016e-01,
+    2.2627119837023168e-01, 2.3139339155384456e-01, 2.3655924796094352e-01,
+    2.4176671779324899e-01, 2.4701354362576396e-01, 2.5229724179249308e-01,
+    2.5761509338852999e-01, 2.6296413708045834e-01, 2.6834115084465322e-01,
+    2.7374274264274504e-01, 2.7916533215333488e-01, 2.8460514138539257e-01,
+    2.9005817729248336e-01, 2.9552022254684045e-01, 3.0098681763146172e-01,
+    3.0645324498093253e-01, 3.1191451418652083e-01, 3.1736534416959472e-01,
+    3.2280014606939607e-01, 3.2821300614828153e-01, 3.3359766946903504e-01,
+    3.3894752364484368e-01, 3.4425558346902693e-01, 3.4951447352929563e-01,
+    3.5471641254444677e-01, 3.5985319806054468e-01, 3.6491619047154630e-01,
+    3.6989629664856500e-01, 3.7478395197909535e-01, 3.7956909423528293e-01,
+    3.8424114309300868e-01, 3.8878897257022948e-01, 3.9320089014601612e-01,
+    3.9746461909731504e-01, 4.0156717318681581e-01, 4.0549483730954039e-01,
+    4.0923314704583337e-01, 4.1276677367704403e-01, 4.1607950794424604e-01,
+    4.1915414612956028e-01, 4.2197247445605261e-01, 4.2451515529346960e-01,
+    4.2676171330673085e-01, 4.2869042155290894e-01, 4.3027828514852066e-01,
+    4.3150103078030896e-01, 4.3233298962092899e-01, 4.3274698053233372e-01,
+    4.3271429344823678e-01, 4.3220457445142065e-01, 4.3118571228608927e-01,
+    4.2962372899214775e-01, 4.2748275847100165e-01, 4.2472493462136662e-01,
+    4.2131026936302518e-01, 4.1719653508096206e-01, 4.1233914352825018e-01,
+    4.0669101804621821e-01, 4.0020236434567608e-01, 3.9282053556904966e-01,
+    3.8448990230935818e-01, 3.7515161289536605e-01, 3.6474334167889177e-01,
+    3.5319902064503441e-01, 3.4044856156053377e-01, 3.2641756303013504e-01,
+    3.1102697954033835e-01, 2.9419284011854755e-01, 2.7582586153705969e-01,
+    2.5583104121904062e-01, 2.3410713463612499e-01, 2.1054605853008394e-01,
+    1.8503204722822094e-01, 1.5744073509744012e-01, 1.2763781721692898e-01,
+    9.5478298457486811e-02, 6.0869525491158086e-02, 2.3067959778369141e-02,
+    0.00000000000000000,
+};
+
+static const double ziggurat_fabsmin = 9.1838303002622427e-03;
+
+static double ziggurat_sample(uint64_t *st, int *have_spare, double *spare) {
+    if (*have_spare) {
+        *have_spare = 0;
+        return *spare;
+    }
+    while (1) {
+        unsigned int ui = prng_uint32_state(st);
+        int i = (int)(ui & 0xFF);
+        double x = prng_uniform_state(st) * ziggurat_x[i];
+        double y = prng_uniform_state(st) * ziggurat_f[i];
+        if (i != 0) {
+            if (y < ziggurat_f[i + 1] + (ziggurat_f[i] - ziggurat_f[i + 1]) * x / ziggurat_x[i]) {
+                *spare = (ui & 0x200) ? -x : x;
+                *have_spare = 1;
+                return x;
+            }
+        } else {
+            if (y < ziggurat_fabsmin * exp(-0.5 * x * x)) {
+                *spare = (ui & 0x200) ? -x : x;
+                *have_spare = 1;
+                return x;
+            }
+        }
+    }
+}
+
+double prng_gauss(void) {
+    return ziggurat_sample(s, &have_spare_gauss, &spare_gauss);
+}
+
+void prng_init_parallel(uint32_t seed) {
+    uint64_t state = (uint64_t)seed;
+    if (state == 0u) state = 1u;
+
+    int nthreads = omp_get_max_threads();
+    if (nthreads > MAX_OMP_THREADS) nthreads = MAX_OMP_THREADS;
+
+    for (int t = 0; t < nthreads; t++) {
+        prng_threads[t].s[0] = splitmix64(&state);
+        prng_threads[t].s[1] = splitmix64(&state);
+        prng_threads[t].s[2] = splitmix64(&state);
+        prng_threads[t].s[3] = splitmix64(&state);
+        prng_threads[t].have_spare_gauss = 0;
+        prng_threads[t].spare_gauss = 0.0;
+    }
+    prng_parallel_initialized = 1;
+}
+
+double prng_gauss_parallel(void) {
+    int tid = omp_get_thread_num();
+    PrngThreadState *ts = &prng_threads[tid];
+    return ziggurat_sample(ts->s, &ts->have_spare_gauss, &ts->spare_gauss);
 }

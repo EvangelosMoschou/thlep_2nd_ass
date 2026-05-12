@@ -37,7 +37,8 @@ void write_complex_trace_stage_artifacts(
     const Complex* sig,
     size_t nsym,
     double fs_hz,
-    double signal_hz);
+    double signal_hz,
+    double display_window_us);
 
 void write_trace_stage_artifacts(
     const char* csv_run_dir,

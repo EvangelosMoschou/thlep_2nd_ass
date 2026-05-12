@@ -61,33 +61,47 @@
  * ============================================================================
  */
 
-#include <ctype.h> /* For isspace() — whitespace detection (not heavily used here) */
-#include <dirent.h> /* For opendir(), readdir() — listing directory contents */
-#include <errno.h>  /* For errno — error code set by file/number operations */
-#include <float.h>  /* For DBL_MAX — largest possible double value */
-#include <limits.h> /* For INT_MIN, INT_MAX, UINT_MAX — integer range limits */
-#include <math.h> /* For sin(), cos(), sqrt(), log10(), pow(), hypot(), etc. */
-#include <stdint.h>    /* For uint32_t, int64_t — fixed-width integer types */
-#include <stdio.h>     /* For printf(), fprintf(), fopen(), fclose(), etc. */
-#include <stdlib.h>    /* For malloc(), calloc(), free(), strtod(), strtoul() */
-#include <string.h>    /* For strcmp(), memset(), memcpy(), snprintf() */
-#include <sys/stat.h>  /* For stat(), mkdir() — checking/creating directories */
-#include <sys/types.h> /* For mode_t — file permission type used with mkdir */
-#include <time.h> /* For time() — current time (used as default PRNG seed) */
+#include <ctype.h>
+#include <dirent.h>
+#include <errno.h>
+#include <float.h>
+#include <limits.h>
+#include <math.h>
+#include <omp.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <time.h>
 
-#include "prng.h"      /* Our pseudo-random number generator (see prng.c) */
-#include "sim_types.h" /* Data types: Complex, StageMetric, SimConfig */
-#include "stage_artifacts.h" /* Output writers: CSV and SVG file generators */
-#include "stage_models.h"    /* CSV loader for receiver stage configurations */
+#include "prng.h"
+#include "sim_types.h"
+#include "stage_artifacts.h"
+#include "stage_models.h"
+#include "phase_noise.h"
+#include "iq_imbalance.h"
+#include "flicker_noise.h"
+#include "biquad_filter.h"
+#include "adc_model.h"
 
-/*
- * M_PI — The mathematical constant π (pi ≈ 3.14159).
- * Not guaranteed to be defined by all C compilers (it's a POSIX extension),
- * so we define it ourselves if it's missing.
- */
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+#define ALIGNMENT 64
+
+static void *alloc_aligned(size_t elem_size, size_t count) {
+  size_t raw = elem_size * count;
+  size_t aligned = (raw + ALIGNMENT - 1u) & ~(ALIGNMENT - 1u);
+  void *p = aligned_alloc(ALIGNMENT, aligned);
+  if (p) memset(p, 0, raw);
+  return p;
+}
+
+#define ALLOC_ALIGNED_D(count) ((double *)alloc_aligned(sizeof(double), (count)))
+#define ALLOC_ALIGNED_C(count) ((Complex *)alloc_aligned(sizeof(Complex), (count)))
 
 /*
  * K_BOLTZMANN — Boltzmann's constant in Joules per Kelvin (J/K).
@@ -171,22 +185,8 @@
  * ============================================================================
  */
 
-/*
- * ensure_dir_exists — Create a directory if it doesn't already exist
- *
- * What it does:
- *   Checks if a path exists and is a directory. If it doesn't exist,
- *   creates it with 0777 permissions (readable/writable/executable by all).
- *
- * Parameters:
- *   path — Directory path to create (e.g., "out/topology_sim_1/csv")
- *
- * Returns:
- *   0  on success (directory exists or was created)
- *   -1 on failure (path is a file, not a directory, or mkdir failed)
- */
 static int ensure_dir_exists(const char *path) {
-  struct stat st; /* stat struct filled by stat() system call */
+  struct stat st;
 
   if (!path) {
     return -1;
@@ -220,11 +220,14 @@ static int ensure_output_dirs(void) {
   if (ensure_dir_exists(OUTPUT_ROOT_DIR) != 0) {
     return -1;
   }
-  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/baseband") != 0) {
+  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/csv") != 0) {
     return -2;
   }
-  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/rf") != 0) {
+  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/constellations") != 0) {
     return -3;
+  }
+  if (ensure_dir_exists(OUTPUT_ROOT_DIR "/traces") != 0) {
+    return -4;
   }
   return 0;
 }
@@ -586,8 +589,8 @@ static double mean_power_complex(const Complex *x, size_t n) {
  * Returns:
  *   Mean noise power (MSE). Returns 0.0 if signals are identical.
  */
-static double mean_noise_power_complex(const Complex *sig, const Complex *ref,
-                                       size_t n) {
+static double mean_noise_power_complex(const Complex *restrict sig,
+                                       const Complex *restrict ref, size_t n) {
   size_t i;
   double p = 0.0;
 
@@ -630,8 +633,8 @@ static double mean_power_real(const double *x, size_t n) {
  * mean_noise_power_real — Noise power for real signals (MSE between sig and
  * ref)
  */
-static double mean_noise_power_real(const double *sig, const double *ref,
-                                    size_t n) {
+static double mean_noise_power_real(const double *restrict sig,
+                                   const double *restrict ref, size_t n) {
   size_t i;
   double p = 0.0;
 
@@ -647,25 +650,6 @@ static double mean_noise_power_real(const double *sig, const double *ref,
   return p / (double)n;
 }
 
-/*
- * add_awgn_complex — Add Additive White Gaussian Noise (AWGN) to a complex
- * signal
- *
- * What it does:
- *   Adds random Gaussian noise to both the I and Q components of each sample.
- *   The noise has total power = noise_power across both components.
- *
- * Why σ = sqrt(noise_power / 2)?
- *   For a complex signal with independent I and Q noise:
- *     Total noise power = σ_I² + σ_Q² = σ² + σ²  = 2σ²
- *   So to achieve a total noise power of P:
- *     σ = sqrt(P/2)
- *
- * Parameters:
- *   x           — Complex signal array (MODIFIED in-place)
- *   n           — Number of samples
- *   noise_power — Desired total noise power to add (must be > 0)
- */
 static void add_awgn_complex(Complex *x, size_t n, double noise_power) {
   size_t i;
   double sigma;
@@ -674,10 +658,11 @@ static void add_awgn_complex(Complex *x, size_t n, double noise_power) {
     return;
   }
 
-  sigma = sqrt(noise_power / 2.0); /* Standard deviation per component */
+  sigma = sqrt(noise_power / 2.0);
+#pragma omp parallel for schedule(static)
   for (i = 0; i < n; ++i) {
-    x[i].re += sigma * prng_gauss(); /* Add Gaussian noise to I component */
-    x[i].im += sigma * prng_gauss(); /* Add Gaussian noise to Q component */
+    x[i].re += sigma * prng_gauss_parallel();
+    x[i].im += sigma * prng_gauss_parallel();
   }
 }
 
@@ -697,9 +682,10 @@ static void add_awgn_real(double *x, size_t n, double noise_power) {
     return;
   }
 
-  sigma = sqrt(noise_power); /* σ for a single dimension */
+  sigma = sqrt(noise_power);
+#pragma omp parallel for schedule(static)
   for (i = 0; i < n; ++i) {
-    x[i] += sigma * prng_gauss();
+    x[i] += sigma * prng_gauss_parallel();
   }
 }
 
@@ -709,19 +695,12 @@ static void add_awgn_real(double *x, size_t n, double noise_power) {
  */
 
 /* copy_complex — Memory copy of n complex values from src to dst */
-static void copy_complex(Complex *dst, const Complex *src, size_t n) {
+static void copy_complex(Complex *restrict dst, const Complex *restrict src,
+                         size_t n) {
   if (!dst || !src || n == 0u) {
     return;
   }
   memcpy(dst, src, n * sizeof(Complex));
-}
-
-/* copy_real — Memory copy of n double values from src to dst */
-static void copy_real(double *dst, const double *src, size_t n) {
-  if (!dst || !src || n == 0u) {
-    return;
-  }
-  memcpy(dst, src, n * sizeof(double));
 }
 
 /*
@@ -758,102 +737,6 @@ static void scale_real(double *x, size_t n, double amp) {
   }
 }
 
-/*
- * moving_average_complex — Causal sliding-window low-pass filter for complex
- * signals
- *
- * What it does:
- *   Computes the average of each sample and its preceding (len-1) samples.
- *   This is equivalent to a rectangular FIR (Finite Impulse Response) low-pass
- *   filter with all coefficients equal to 1/len.
- *
- *   out[i] = average of in[max(0, i-len+1) ... i]
- *
- * Why a moving average?
- *   Real receiver components like Band-Pass Filters (BPF) and Low-Pass Filters
- *   (LPF) are modeled as moving-average filters because they average out
- *   high-frequency components and smooth the signal. The longer the filter
- *   (larger len), the more aggressive the smoothing.
- *
- * Efficient O(n) implementation:
- *   Instead of recalculating the sum of the window from scratch for every
- *   sample (O(n × len)), we maintain a running sum and add/remove one sample
- *   at each step (O(n)). This matters for the RF path where n can be millions.
- *
- * IMPORTANT: in and out must be DIFFERENT buffers (no in-place operation).
- *   If len ≤ 1, the input is copied to output unchanged (no filtering).
- *
- * Parameters:
- *   in  — Input signal (n complex samples)
- *   out — Output filtered signal (n complex samples, must differ from in)
- *   n   — Number of samples
- *   len — Filter length (window size). 1 = no filtering.
- */
-static void moving_average_complex(const Complex *in, Complex *out, size_t n,
-                                   int len) {
-  const size_t win = (size_t)len; /* Window size as unsigned */
-  double sum_re = 0.0; /* Running sum of I components in the window */
-  double sum_im = 0.0; /* Running sum of Q components in the window */
-  size_t wcount = 0u;  /* Current number of samples in the window */
-  size_t i;
-
-  /* If no filtering needed, just copy input to output */
-  if (!in || !out || n == 0u || len <= 1) {
-    if (in && out && in != out) {
-      memcpy(out, in, n * sizeof(Complex));
-    }
-    return;
-  }
-
-  for (i = 0u; i < n; ++i) {
-    /* Add the newest sample to the running sum */
-    sum_re += in[i].re;
-    sum_im += in[i].im;
-    ++wcount;
-
-    /* If the window would exceed `len` samples, remove the oldest one */
-    if (wcount > win) {
-      sum_re -= in[i - win].re;
-      sum_im -= in[i - win].im;
-      --wcount;
-    }
-
-    /* Output is the average of all samples currently in the window */
-    out[i].re = sum_re / (double)wcount;
-    out[i].im = sum_im / (double)wcount;
-  }
-}
-
-/*
- * bpf_moving_average_real — Causal Band-Pass Filter for RF signals
- * Acts as the RF equivalent of moving_average_complex centered at fc_hz.
- */
-static void bpf_moving_average_real(const double *in, double *out, size_t n,
-                                    int len, double fs_hz, double fc_hz) {
-  size_t i;
-  int k;
-  double omega = 2.0 * M_PI * fc_hz / fs_hz;
-
-  if (!in || !out || n == 0u || len <= 1) {
-    if (in && out && in != out) {
-      memcpy(out, in, n * sizeof(double));
-    }
-    return;
-  }
-
-  for (i = 0u; i < n; ++i) {
-    double sum = 0.0;
-    int limit = (i + 1 < (size_t)len) ? (int)(i + 1) : len;
-
-    for (k = 0; k < limit; ++k) {
-      /* Bandpass equivalent filter taps */
-      double h = (2.0 / (double)len) * cos(omega * k);
-      sum += in[i - k] * h;
-    }
-    out[i] = sum;
-  }
-}
-
 /* ============================================================================
  * STAGE METRICS COMPUTATION
  * ============================================================================
@@ -887,8 +770,8 @@ static void bpf_moving_average_real(const double *in, double *out, size_t n,
  *   A fully populated StageMetric struct
  */
 static StageMetric compute_metric_complex(const char *stage, const char *domain,
-                                          const Complex *ref,
-                                          const Complex *sig, size_t n) {
+                                          const Complex *restrict ref,
+                                          const Complex *restrict sig, size_t n) {
   StageMetric m;
 
   m.stage = stage;
@@ -924,8 +807,8 @@ static StageMetric compute_metric_complex(const char *stage, const char *domain,
  * signals.
  */
 static StageMetric compute_metric_real(const char *stage, const char *domain,
-                                       const double *ref, const double *sig,
-                                       size_t n) {
+                                       const double *restrict ref,
+                                       const double *restrict sig, size_t n) {
   StageMetric m;
 
   m.stage = stage;
@@ -1006,8 +889,9 @@ static StageMetric compute_metric_real(const char *stage, const char *domain,
  * Returns:
  *   StageMetric with SNR and EVM measured AFTER processing
  */
-static StageMetric apply_stage_complex(const StageModel *stg, Complex *ref,
-                                       Complex *sig, size_t n,
+static StageMetric apply_stage_complex(const StageModel *stg,
+                                      Complex *restrict ref,
+                                      Complex *restrict sig, size_t n,
                                        const char *domain, double N_t0_W,
                                        double *N_current, double *Gain_total,
                                        double P_sig_in_W) {
@@ -1137,6 +1021,115 @@ static StageMetric apply_stage_complex(const StageModel *stg, Complex *ref,
 }
 
 /*
+ * apply_stage_real_fused — Fused single-pass RF stage processing
+ *
+ * Combines: nonlinearity → gain → noise → limiter in ONE parallel loop.
+ * Mathematically identical to calling them separately, but:
+ * - Reduces memory traffic from 4 passes to 1 pass
+ * - Better cache locality, fewer bounds checks, fewer function calls
+ */
+static StageMetric apply_stage_real_fused(const StageModel *stg,
+                                         double *restrict ref, double *restrict sig,
+                                         size_t n, const char *domain,
+                                         double N_t0_W, double fs_hz,
+                                         double __attribute__((unused)) fc_hz,
+                                         double *N_current, double *Gain_total,
+                                         double P_sig_in_W) {
+  double g_lin, F, pn_add, N_t0_v2;
+  size_t i;
+
+  N_t0_v2 = N_t0_W * R_LOAD_OHM;
+
+  g_lin = db_to_lin(stg->gain_db);
+  double amp_gain = sqrt(g_lin);
+  F = db_to_lin(stg->nf_db);
+  if (F < 1.0) F = 1.0;
+  pn_add = N_t0_v2 * g_lin * (F - 1.0) * (fs_hz / (2.0 * B_NOISE_HZ));
+
+  int has_ip3 = (stg->ip3_dbm != INFINITY);
+  int has_p1db = (stg->p1db_dbm != INFINITY);
+  double iip3_v2 = 0, ip1db_v2 = 0;
+  if (has_ip3) {
+    iip3_v2 = pow(10.0, (stg->ip3_dbm - 30.0) / 10.0) * R_LOAD_OHM;
+  }
+  if (has_p1db) {
+    ip1db_v2 = pow(10.0, (stg->p1db_dbm - 30.0) / 10.0) * R_LOAD_OHM;
+  }
+
+  int has_am_pm = (stg->am_pm_coeff != 0.0);
+  double p1db_threshold_v2 = has_p1db ? ip1db_v2 : 0.0;
+
+  double sigma = (pn_add > 0.0) ? sqrt(pn_add) : 0.0;
+  int has_limiter = stg->is_limiter;
+  const double max_amp = 10.0;
+
+#pragma omp parallel for schedule(static)
+  for (i = 0; i < n; i++) {
+    double s_scale = 1.0;
+    if (has_ip3 || has_p1db) {
+      double p_in = sig[i] * sig[i];
+      if (has_ip3) {
+        double comp = (1.0 / 3.0) * (p_in / iip3_v2);
+        if (comp > 0.9) comp = 0.9;
+        s_scale *= (1.0 - comp);
+      }
+      if (has_p1db) {
+        if (p_in > (ip1db_v2 * 0.794)) {
+          s_scale *= sqrt(ip1db_v2 / p_in);
+        }
+      }
+    }
+    if (has_am_pm) {
+      double p_in = sig[i] * sig[i];
+      if (p_in > p1db_threshold_v2) {
+        double p_in_dBm = 10.0 * log10(p_in / R_LOAD_OHM) + 30.0;
+        double p1db_dBm = stg->p1db_dbm;
+        double phase_shift_deg = stg->am_pm_coeff * (p_in_dBm - p1db_dBm);
+        double phi = phase_shift_deg * (3.14159265358979323846 / 180.0);
+        s_scale *= cos(phi);
+      }
+    }
+
+    double r = ref[i] * amp_gain;
+    double s = sig[i] * s_scale * amp_gain;
+
+    if (sigma > 0.0) {
+      s += sigma * prng_gauss_parallel();
+    }
+
+    if (has_limiter) {
+      if (r > max_amp) r = max_amp;
+      else if (r < -max_amp) r = -max_amp;
+      if (s > max_amp) s = max_amp;
+      else if (s < -max_amp) s = -max_amp;
+    }
+
+    ref[i] = r;
+    sig[i] = s;
+  }
+
+  {
+    double P_added_W = N_t0_W * g_lin * (F - 1.0);
+    *Gain_total *= g_lin;
+    *N_current = (*N_current) * g_lin + P_added_W;
+  }
+
+  {
+    StageMetric m_out = compute_metric_real(stg->name, domain, ref, sig, n);
+    m_out.gain_db = stg ? stg->gain_db : NAN;
+    m_out.nf_db = stg ? stg->nf_db : NAN;
+    m_out.filter_len = stg ? stg->filter_len : 0;
+    m_out.is_limiter = stg ? stg->is_limiter : 0;
+
+    if (N_current && Gain_total && *N_current > 0.0) {
+      double P_sig_curr = P_sig_in_W * (*Gain_total);
+      m_out.snr_db = lin_to_db(P_sig_curr / (*N_current));
+    }
+    return m_out;
+  }
+}
+
+/*
  * apply_stage_real — Process a real (non-complex) signal through one receiver
  * stage
  *
@@ -1146,8 +1139,9 @@ static StageMetric apply_stage_complex(const StageModel *stg, Complex *ref,
  *
  * EVM in the returned metric is always NaN (undefined for real signals).
  */
-static StageMetric apply_stage_real(const StageModel *stg, double *ref,
-                                    double *sig, size_t n, const char *domain,
+static StageMetric apply_stage_real(const StageModel *stg,
+                                   double *restrict ref, double *restrict sig,
+                                   size_t n, const char *domain,
                                     double N_t0_W, double fs_hz,
                                     double __attribute__((unused)) fc_hz,
                                     double *N_current, double *Gain_total,
@@ -1234,6 +1228,7 @@ static StageMetric apply_stage_real(const StageModel *stg, double *ref,
   if (stg->is_limiter) {
     const double placeholder_max_amp = 10.0;
     size_t i;
+#pragma omp parallel for schedule(static)
     for (i = 0; i < n; ++i) {
       if (ref[i] > placeholder_max_amp)
         ref[i] = placeholder_max_amp;
@@ -1322,280 +1317,9 @@ static double complex_real_vpp(const Complex *x, size_t n) {
  * ============================================================================
  */
 
-/*
- * env_to_rf_real — Upconvert a complex baseband envelope to a real RF waveform
- *
- * What it does:
- *   Takes complex baseband samples (I + jQ) and modulates them onto an RF
- *   carrier at frequency fc_hz, producing a real-valued RF signal:
- *
- *     RF(t) = I(t) × cos(2πf_c t) − Q(t) × sin(2πf_c t)
- *
- *   This is standard IQ modulation (used in virtually all modern radios).
- *
- * Implementation:
- *   Instead of computing cos() and sin() for every sample (very expensive),
- *   we use a numerically controlled oscillator (NCO):
- *     - Start with osc = (1, 0) = cos(0) + j·sin(0)
- *     - Each sample: multiply by the rotation phasor w = (cos(Δθ), sin(Δθ))
- *     - This rotates the oscillator by one frequency step each sample
- *   This is much faster because complex multiplication is cheaper than
- *   transcendental functions (cos/sin).
- *
- * Numerical stability:
- *   Over millions of multiplications, the oscillator magnitude can drift
- *   from exactly 1.0 due to floating-point rounding errors. Every 1024
- *   samples, we re-normalize the oscillator to prevent this drift from
- *   accumulating and causing amplitude errors.
- *
- * Parameters:
- *   env    — Complex baseband envelope (I + jQ) array
- *   n      — Number of samples
- *   fs_hz  — Sampling frequency in Hz (e.g., 96 GHz = 96e9)
- *   fc_hz  — Carrier frequency in Hz (e.g., 24 GHz = 24e9)
- *   rf_out — Output real RF waveform buffer (pre-allocated, n elements)
- */
-static void env_to_rf_real(const Complex *env, size_t n, double fs_hz,
-                           double fc_hz, double *rf_out) {
-  size_t i;
 
-  /* Phase increment per sample: how much the carrier rotates each sample */
-  const double dtheta = 2.0 * M_PI * fc_hz / fs_hz;
-
-  /* Pre-compute the rotation phasor (cos(Δθ) + j·sin(Δθ)) */
-  const double w_re = cos(dtheta); /* Real part of rotation phasor */
-  const double w_im = sin(dtheta); /* Imaginary part of rotation phasor */
-
-  /* Oscillator state: starts at (1, 0) = cos(0) + j·sin(0) */
-  double osc_re = 1.0;
-  double osc_im = 0.0;
-
-  for (i = 0; i < n; ++i) {
-    /*
-     * IQ modulation formula:
-     *   RF[i] = env_I[i] × cos(ωt) − env_Q[i] × sin(ωt)
-     *
-     * where osc_re = cos(ωt) and osc_im = sin(ωt) from the NCO
-     */
-    rf_out[i] = env[i].re * osc_re - env[i].im * osc_im;
-
-    /* Advance the oscillator by one sample (complex multiply by rotation
-     * phasor) */
-    {
-      const double next_re = osc_re * w_re - osc_im * w_im;
-      const double next_im = osc_re * w_im + osc_im * w_re;
-      osc_re = next_re;
-      osc_im = next_im;
-    }
-
-    /* Re-normalize the oscillator every 1024 samples to prevent drift */
-    if ((i & 1023u) == 1023u) {
-      const double norm = hypot(osc_re, osc_im); /* = sqrt(re² + im²) */
-      if (norm > 0.0) {
-        osc_re /= norm;
-        osc_im /= norm;
-      }
-    }
-  }
-}
-
-/*
- * mix_down_and_lowpass — Downconvert RF back to complex baseband with low-pass
- * filtering
- *
- * What it does:
- *   This is the inverse of env_to_rf_real. It takes a real RF signal and
- *   recovers the original complex baseband (I + jQ) signal by:
- *
- *   1. MIXING (frequency translation):
- *      Multiply the RF signal by local oscillator signals at the same carrier
- * frequency: I_raw = 2 × RF × cos(2πf_c t + φ_n(t))    — recovers the In-phase
- * component Q_raw = −2 × RF × sin(2πf_c t + φ_n(t))   — recovers the Quadrature
- * component
- *
- *      Added: Local Oscillator Phase Noise φ_n(t) modeled as a random walk
- * (Wiener Process).
- *
- *   2. LOW-PASS FILTERING:
- *      The mixing process creates a copy of the signal centered at 2×f_c (the
- * "image"). A first-order exponential low-pass filter is applied to remove this
- * image: y[n] = (1-α) × x[n] + α × y[n-1] where α = exp(−2π × f_cutoff / f_s)
- *
- *      The cutoff frequency defaults to fs/16 if not specified, but is
- * typically set to 0.75 × Nyquist bandwidth (symbol_rate × (1 + rolloff)).
- *
- * Parameters:
- *   rf        — Input real RF signal
- *   n         — Number of samples
- *   fs_hz     — Sampling frequency (Hz)
- *   fc_hz     — Carrier frequency (Hz) — must match the transmitter's carrier
- *   cutoff_hz — Low-pass filter cutoff frequency (Hz). If ≤ 0, defaults to
- * fs/16. bb_out    — Output complex baseband signal (pre-allocated, n elements)
- */
-static size_t mix_down_and_lowpass(const double *rf, size_t n, double fs_hz,
-                                   double fc_hz, double cutoff_hz,
-                                   size_t dec_factor, Complex *bb_out) {
-  size_t i;
-  size_t out_idx = 0;
-
-  /* Phase Noise parameters for LO */
-  double phase_noise = 0.0;
-  /* phase_step_stddev controls how fast the phase wanders.
-   * NOTE: Set to 0.0 currently. If > 0, calling this function separately on
-   * the reference and signal streams will cause their phase random-walks to
-   * diverge, drastically degrading SNR/EVM calculations. They must use the same
-   * LO phase stream. */
-  const double phase_step_stddev = 0.0;
-
-  /* NCO parameters */
-  const double dtheta = 2.0 * M_PI * fc_hz / fs_hz;
-  double current_theta = 0.0;
-
-  /* Low-pass filter state (I and Q channels filtered independently) */
-  double i_state = 0.0; /* I channel filter state */
-  double q_state = 0.0; /* Q channel filter state */
-  double alpha;         /* Filter smoothing coefficient */
-
-  /* Default cutoff if not specified */
-  if (cutoff_hz <= 0.0) {
-    cutoff_hz = fs_hz / 16.0;
-  }
-
-  /*
-   * Compute the first-order IIR filter coefficient:
-   *   alpha = exp(-2π × f_cutoff / f_s)
-   * Higher alpha → more smoothing → lower cutoff frequency
-   * alpha close to 0 → almost no filtering
-   */
-  alpha = exp(-2.0 * M_PI * cutoff_hz / fs_hz);
-
-  for (i = 0; i < n; ++i) {
-    /* Update Phase Noise (Random Walk) */
-    phase_noise += prng_gauss() * phase_step_stddev;
-
-    /* Total instantaneous phase */
-    double theta_total = current_theta + phase_noise;
-
-    /* Oscillator components with phase noise */
-    double lo_i = cos(theta_total);
-    double lo_q = sin(theta_total);
-
-    /*
-     * Step 1: Mix the RF signal with local oscillator (cosine and -sine).
-     * The factor of 2 compensates for the half-power lost in the mixing
-     * process.
-     */
-    const double i_raw = 2.0 * rf[i] * lo_i;  /* I = 2 × RF × cos(ωt + φ) */
-    const double q_raw = -2.0 * rf[i] * lo_q; /* Q = -2 × RF × sin(ωt + φ) */
-
-    /*
-     * Step 2: First-order exponential low-pass filter.
-     * This is an IIR (Infinite Impulse Response) filter:
-     *   y[n] = (1-α) × x[n] + α × y[n-1]
-     * It smooths out the 2×fc image component while passing the baseband.
-     */
-    i_state = (1.0 - alpha) * i_raw + alpha * i_state;
-    q_state = (1.0 - alpha) * q_raw + alpha * q_state;
-
-    /* Store the filtered baseband output (decimated) */
-    if (i % dec_factor == 0) {
-      bb_out[out_idx].re = i_state;
-      bb_out[out_idx].im = q_state;
-      out_idx++;
-    }
-
-    /* Advance the pure NCO phase */
-    current_theta += dtheta;
-    /* Keep it within bounds to avoid precision loss on huge angles over time */
-    if (current_theta > 2.0 * M_PI) {
-      current_theta -= 2.0 * M_PI;
-    }
-  }
-
-  return out_idx;
-}
 
 static double rrc_tap_value(double t, double rolloff);
-
-/*
- * shape_symbols_rrc_to_env — Pulse-shape symbols with an RRC envelope
- *
- * What it does:
- *   Builds a causal root-raised-cosine waveform by placing a normalized RRC
- *   pulse at each symbol time. This is the MATLAB-style transmit shaping path.
- *
- * Parameters:
- *   symbols — Input symbol array (nsym complex values)
- *   nsym    — Number of symbols
- *   sps     — Samples per symbol (upsampling factor)
- *   rolloff — Root-raised-cosine rolloff factor
- *   env     — Output envelope array (must have room for the pulse tail)
- */
-static void shape_symbols_rrc_to_env(const Complex *symbols, size_t nsym,
-                                     int sps, double rolloff, Complex *env) {
-  const int span = 20;
-  size_t pulse_len;
-  size_t total_len;
-  double *pulse;
-  size_t i;
-  size_t k;
-  double norm_sq = 0.0;
-
-  if (!symbols || !env || nsym == 0u || sps <= 0) {
-    return;
-  }
-
-  if (rolloff <= 0.0) {
-    for (i = 0u; i < nsym; ++i) {
-      for (k = 0u; k < (size_t)sps; ++k) {
-        env[i * (size_t)sps + k] = symbols[i];
-      }
-    }
-    return;
-  }
-
-  pulse_len = (size_t)span * (size_t)sps + 1u;
-  total_len = nsym * (size_t)sps + pulse_len - 1u;
-  pulse = (double *)calloc(pulse_len, sizeof(double));
-  if (!pulse) {
-    for (i = 0u; i < nsym; ++i) {
-      for (k = 0u; k < (size_t)sps; ++k) {
-        env[i * (size_t)sps + k] = symbols[i];
-      }
-    }
-    return;
-  }
-
-  for (k = 0u; k < pulse_len; ++k) {
-    const double t =
-        ((double)k - ((double)pulse_len - 1.0) / 2.0) / (double)sps;
-    const double value = rrc_tap_value(t, rolloff);
-    pulse[k] = value;
-    norm_sq += value * value;
-  }
-
-  if (norm_sq > 0.0) {
-    const double norm = sqrt(norm_sq);
-    for (k = 0u; k < pulse_len; ++k) {
-      pulse[k] /= norm;
-    }
-  }
-
-  memset(env, 0, total_len * sizeof(Complex));
-  for (i = 0u; i < nsym; ++i) {
-    const size_t base = i * (size_t)sps;
-    for (k = 0u; k < pulse_len; ++k) {
-      const size_t idx = base + k;
-      if (idx >= total_len) {
-        break;
-      }
-      env[idx].re += symbols[i].re * pulse[k];
-      env[idx].im += symbols[i].im * pulse[k];
-    }
-  }
-
-  free(pulse);
-}
 
 /*
  * rrc_tap_value — Root-raised-cosine pulse sample used for matching
@@ -1616,6 +1340,137 @@ static double rrc_tap_value(double t, double rolloff) {
         M_PI * t * (1.0 - (4.0 * rolloff * t) * (4.0 * rolloff * t));
     return num / den;
   }
+}
+
+/*
+ * FFT-based convolution for Complex signals
+ *
+ * Optimization: Replace O(n × pulse_len) time-domain convolution with
+ * O(n log n) FFT-based convolution for large n.
+ *
+ * Mathematical equivalence: For zero-padded inputs, FFT convolution produces
+ * exactly the same result as time-domain convolution (within floating-point
+ * rounding error).
+ */
+
+/*
+ * next_pow2 — Find the next power of 2 >= n
+ */
+static size_t next_pow2(size_t n) {
+    size_t p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+/*
+ * bitrev — Compute bit-reversed index for FFT
+ */
+static size_t bitrev(size_t x, size_t bits) {
+    size_t rev = 0;
+    for (size_t i = 0; i < bits; ++i) {
+        rev = (rev << 1) | (x & 1);
+        x >>= 1;
+    }
+    return rev;
+}
+
+/*
+ * simple_fft — In-place Cooley-Tukey FFT for complex signals
+ * N must be a power of 2
+ */
+static void simple_fft(Complex *x, size_t N) {
+    size_t bits = 0;
+    size_t tmp = N;
+    while (tmp > 1) { bits++; tmp >>= 1; }
+
+    for (size_t i = 0; i < N; ++i) {
+        size_t j = bitrev(i, bits);
+        if (i < j) {
+            double re = x[i].re;
+            double im = x[i].im;
+            x[i].re = x[j].re;
+            x[i].im = x[j].im;
+            x[j].re = re;
+            x[j].im = im;
+        }
+    }
+
+    for (size_t size = 2; size <= N; size <<= 1) {
+        double angle = -2.0 * M_PI / (double)size;
+        for (size_t i = 0; i < N; i += size) {
+            for (size_t j = 0; j < size / 2; ++j) {
+                size_t idx1 = i + j;
+                size_t idx2 = idx1 + size / 2;
+
+                double w_re = cos(angle * (double)j);
+                double w_im = sin(angle * (double)j);
+
+                double t_re = x[idx2].re * w_re - x[idx2].im * w_im;
+                double t_im = x[idx2].re * w_im + x[idx2].im * w_re;
+
+                x[idx2].re = x[idx1].re - t_re;
+                x[idx2].im = x[idx1].im - t_im;
+                x[idx1].re += t_re;
+                x[idx1].im += t_im;
+            }
+        }
+    }
+}
+
+/*
+ * simple_ifft — In-place inverse FFT
+ */
+static void simple_ifft(Complex *X, size_t N) {
+    for (size_t i = 0; i < N; ++i) {
+        X[i].im = -X[i].im;
+    }
+    simple_fft(X, N);
+    for (size_t i = 0; i < N; ++i) {
+        X[i].re /= (double)N;
+        X[i].im /= (double)N;
+    }
+}
+
+/*
+ * fft_convolve_complex — FFT-based convolution for complex signals
+ * Uses zero-padding to avoid circular convolution artifacts.
+ */
+static void fft_convolve_complex(const Complex *restrict a, size_t n_a,
+                                  const double *b_real, size_t n_b,
+                                  Complex *restrict out, size_t out_len) {
+    size_t result_len = n_a + n_b - 1;
+    size_t fft_size = next_pow2(result_len);
+
+    Complex *A = (Complex *)calloc(fft_size, sizeof(Complex));
+    Complex *B = (Complex *)calloc(fft_size, sizeof(Complex));
+    if (!A || !B) {
+        if (A) free(A);
+        if (B) free(B);
+        return;
+    }
+
+    for (size_t i = 0; i < n_a; ++i) A[i] = a[i];
+    for (size_t i = 0; i < n_b; ++i) { B[i].re = b_real[i]; B[i].im = 0.0; }
+
+    simple_fft(A, fft_size);
+    simple_fft(B, fft_size);
+
+    for (size_t i = 0; i < fft_size; ++i) {
+        double re = A[i].re * B[i].re - A[i].im * B[i].im;
+        double im = A[i].re * B[i].im + A[i].im * B[i].re;
+        A[i].re = re;
+        A[i].im = im;
+    }
+
+    simple_ifft(A, fft_size);
+
+    for (size_t i = 0; i < out_len; ++i) {
+        out[i].re = A[i].re;
+        out[i].im = A[i].im;
+    }
+
+    free(A);
+    free(B);
 }
 
 /*
@@ -1676,20 +1531,9 @@ static size_t synchronize_and_downsample(const Complex *bb_stream, size_t n_in,
       }
     }
 
-    for (i = 0u; i < n_tot + pulse_len - 1u; ++i) {
-      double sum_re = 0.0;
-      double sum_im = 0.0;
-
-      for (k = 0u; k < pulse_len; ++k) {
-        if (i >= k && (i - k) < n_tot) {
-          sum_re += bb_stream[i - k].re * pulse[k];
-          sum_im += bb_stream[i - k].im * pulse[k];
-        }
-      }
-
-      matched[i].re = sum_re;
-      matched[i].im = sum_im;
-    }
+    /* FFT-based convolution (optimization: O(n log n) vs O(n × pulse_len)) */
+    fft_convolve_complex(bb_stream, n_tot, pulse, pulse_len,
+                         matched, n_tot + pulse_len - 1u);
 
     free(pulse);
   } else {
@@ -1799,20 +1643,25 @@ static size_t synchronize_and_downsample(const Complex *bb_stream, size_t n_in,
         const Complex rx = sym_stream[opt_delay + k];
         const Complex txv = tx[k];
 
-        /* MATLAB: alpha = (tx_eval' * rx_sym) / (rx_sym' * rx_sym) */
+        /* Least-squares channel estimate: alpha = (tx' * rx) / (tx' * tx) */
         num_re += txv.re * rx.re + txv.im * rx.im;
         num_im += txv.re * rx.im - txv.im * rx.re;
-        den += rx.re * rx.re + rx.im * rx.im;
+        den += txv.re * txv.re + txv.im * txv.im;
       }
 
       if (den > 0.0) {
         const double alpha_re = num_re / den;
         const double alpha_im = num_im / den;
 
+        /* Complex reciprocal: 1/alpha = conj(alpha) / |alpha|² */
+        const double alpha_mag_sq = alpha_re * alpha_re + alpha_im * alpha_im;
+        const double inv_re = alpha_re / alpha_mag_sq;
+        const double inv_im = -alpha_im / alpha_mag_sq;
+
         for (k = 0u; k < eval_len; ++k) {
           const Complex rx = sym_stream[opt_delay + k];
-          out[k].re = rx.re * alpha_re - rx.im * alpha_im;
-          out[k].im = rx.re * alpha_im + rx.im * alpha_re;
+          out[k].re = rx.re * inv_re - rx.im * inv_im;
+          out[k].im = rx.re * inv_im + rx.im * inv_re;
         }
       } else {
         eval_len = 0u;
@@ -1828,6 +1677,329 @@ static size_t synchronize_and_downsample(const Complex *bb_stream, size_t n_in,
     free(matched);
     return eval_len;
   }
+}
+
+/* ============================================================================
+ * STRUCTURE-OF-ARRAYS (SoA) SIGNAL PROCESSING
+ * ============================================================================
+ *
+ * SoA layout stores all re[] contiguously, then all im[] contiguously,
+ * enabling SIMD vectorization (4+ doubles per instruction with AVX2).
+ *
+ * The Complex struct (AoS) interleaves re/im: [r0,i0,r1,i1,...]
+ * SoA separates them: [r0,r1,r2,...] and [i0,i1,i2,...]
+ *
+ * All SoA functions use restrict to guarantee no pointer aliasing.
+ * ============================================================================
+ */
+
+static void pack_complex(const double *restrict re, const double *restrict im,
+                         size_t n, Complex *restrict dst) {
+  size_t i;
+  for (i = 0; i < n; ++i) {
+    dst[i].re = re[i];
+    dst[i].im = im[i];
+  }
+}
+
+/* --- SoA elemental operations --- */
+
+static void add_awgn_soa(double *restrict re, double *restrict im, size_t n,
+                         double noise_power) {
+  size_t i;
+  double sigma;
+  if (!re || !im || n == 0u || noise_power <= 0.0)
+    return;
+  sigma = sqrt(noise_power / 2.0);
+#pragma omp parallel for schedule(static)
+  for (i = 0; i < n; ++i) {
+    re[i] += sigma * prng_gauss_parallel();
+    im[i] += sigma * prng_gauss_parallel();
+  }
+}
+
+static void scale_soa(double *restrict re, double *restrict im, size_t n,
+                      double amp) {
+  size_t i;
+  if (!re || !im || n == 0u)
+    return;
+#pragma omp parallel for
+  for (i = 0; i < n; ++i) {
+    re[i] *= amp;
+    im[i] *= amp;
+  }
+}
+
+static double mean_power_soa(const double *restrict re,
+                             const double *restrict im, size_t n) {
+  size_t i;
+  double p = 0.0;
+  if (!re || !im || n == 0u)
+    return 0.0;
+#pragma omp parallel for reduction(+ : p)
+  for (i = 0; i < n; ++i) {
+    p += re[i] * re[i] + im[i] * im[i];
+  }
+  return p / (double)n;
+}
+
+static double mean_noise_power_soa(const double *restrict sig_re,
+                                   const double *restrict sig_im,
+                                   const double *restrict ref_re,
+                                   const double *restrict ref_im, size_t n) {
+  size_t i;
+  double p = 0.0;
+  if (!sig_re || !sig_im || !ref_re || !ref_im || n == 0u)
+    return 0.0;
+#pragma omp parallel for reduction(+ : p)
+  for (i = 0; i < n; ++i) {
+    double dr = sig_re[i] - ref_re[i];
+    double di = sig_im[i] - ref_im[i];
+    p += dr * dr + di * di;
+  }
+  return p / (double)n;
+}
+
+/* --- SoA stage application (the big one) --- */
+
+static StageMetric apply_stage_soa(
+    const StageModel *stg, double *restrict ref_re, double *restrict ref_im,
+    double *restrict sig_re, double *restrict sig_im, size_t n,
+    const char *domain, double N_t0_W, double *N_current, double *Gain_total,
+    double P_sig_in_W) {
+  double amp_gain, g_lin, F, pn_add, N_t0_v2;
+  size_t i;
+
+  N_t0_v2 = N_t0_W * R_LOAD_OHM;
+
+  /* --- STEP 0: NONLINEARITY --- */
+  if (stg->ip3_dbm != INFINITY || stg->p1db_dbm != INFINITY) {
+    double iip3_v2 = 0, ip1db_v2 = 0;
+    if (stg->ip3_dbm != INFINITY) {
+      double iip3_w = pow(10.0, (stg->ip3_dbm - 30.0) / 10.0);
+      iip3_v2 = iip3_w * R_LOAD_OHM;
+    }
+    if (stg->p1db_dbm != INFINITY) {
+      double ip1db_w = pow(10.0, (stg->p1db_dbm - 30.0) / 10.0);
+      ip1db_v2 = ip1db_w * R_LOAD_OHM;
+    }
+
+#pragma omp parallel for schedule(static)
+    for (i = 0; i < n; i++) {
+      double p_in_inst = ref_re[i] * ref_re[i] + ref_im[i] * ref_im[i];
+      double s = 1.0;
+      if (stg->ip3_dbm != INFINITY) {
+        double comp = (1.0 / 3.0) * (p_in_inst / iip3_v2);
+        if (comp > 0.9) comp = 0.9;
+        s *= (1.0 - comp);
+      }
+      if (stg->p1db_dbm != INFINITY) {
+        if (p_in_inst > (ip1db_v2 * 0.794))
+          s *= sqrt(ip1db_v2 / p_in_inst);
+      }
+      ref_re[i] *= s;
+      ref_im[i] *= s;
+    }
+
+#pragma omp parallel for schedule(static)
+    for (i = 0; i < n; i++) {
+      double p_in_inst = sig_re[i] * sig_re[i] + sig_im[i] * sig_im[i];
+      double s = 1.0;
+      if (stg->ip3_dbm != INFINITY) {
+        double comp = (1.0 / 3.0) * (p_in_inst / iip3_v2);
+        if (comp > 0.9) comp = 0.9;
+        s *= (1.0 - comp);
+      }
+      if (stg->p1db_dbm != INFINITY) {
+        if (p_in_inst > (ip1db_v2 * 0.794))
+          s *= sqrt(ip1db_v2 / p_in_inst);
+      }
+      sig_re[i] *= s;
+      sig_im[i] *= s;
+    }
+  }
+
+  /* --- STEP 1: GAIN --- */
+  g_lin = db_to_lin(stg->gain_db);
+  amp_gain = sqrt(g_lin);
+  scale_soa(ref_re, ref_im, n, amp_gain);
+  scale_soa(sig_re, sig_im, n, amp_gain);
+
+  /* --- STEP 2: NOISE INJECTION --- */
+  F = db_to_lin(stg->nf_db);
+  if (F < 1.0) F = 1.0;
+  pn_add = N_t0_v2 * g_lin * (F - 1.0);
+  if (pn_add > 0.0) {
+    add_awgn_soa(sig_re, sig_im, n, pn_add);
+  }
+
+  /* --- STEP 3: Friis tracker --- */
+  {
+    double P_added_W = N_t0_W * g_lin * (F - 1.0);
+    *Gain_total *= g_lin;
+    *N_current = (*N_current) * g_lin + P_added_W;
+  }
+
+  /* --- STEP 4: LIMITER --- */
+  if (stg->is_limiter) {
+    const double max_amp = 10.0;
+    for (i = 0; i < n; ++i) {
+      double mag_r = sqrt(ref_re[i] * ref_re[i] + ref_im[i] * ref_im[i]);
+      double mag_s = sqrt(sig_re[i] * sig_re[i] + sig_im[i] * sig_im[i]);
+      if (mag_r > max_amp && mag_r > 0.0) {
+        ref_re[i] = (ref_re[i] / mag_r) * max_amp;
+        ref_im[i] = (ref_im[i] / mag_r) * max_amp;
+      }
+      if (mag_s > max_amp && mag_s > 0.0) {
+        sig_re[i] = (sig_re[i] / mag_s) * max_amp;
+        sig_im[i] = (sig_im[i] / mag_s) * max_amp;
+      }
+    }
+  }
+
+  /* Compute metric using SoA */
+  {
+    StageMetric m_out;
+    m_out.stage = stg->name;
+    m_out.domain = domain;
+    m_out.gain_db = stg->gain_db;
+    m_out.nf_db = stg->nf_db;
+    m_out.filter_len = stg->filter_len;
+    m_out.is_limiter = stg->is_limiter;
+    m_out.signal_power = mean_power_soa(ref_re, ref_im, n);
+    m_out.noise_power = mean_noise_power_soa(sig_re, sig_im, ref_re, ref_im, n);
+
+    if (m_out.signal_power > 0.0 && m_out.noise_power > 0.0) {
+      m_out.snr_db = lin_to_db(m_out.signal_power / m_out.noise_power);
+      m_out.evm_pct = sqrt(m_out.noise_power / m_out.signal_power) * 100.0;
+    } else if (m_out.signal_power > 0.0 && m_out.noise_power == 0.0) {
+      m_out.snr_db = INFINITY;
+      m_out.evm_pct = 0.0;
+    } else {
+      m_out.snr_db = -INFINITY;
+      m_out.evm_pct = NAN;
+    }
+
+    if (N_current && Gain_total && *N_current > 0.0) {
+      double P_sig_curr = P_sig_in_W * (*Gain_total);
+      m_out.snr_db = lin_to_db(P_sig_curr / (*N_current));
+    }
+    return m_out;
+  }
+}
+
+/* --- SoA upconversion --- */
+
+static void env_to_rf_soa(const double *restrict env_re,
+                          const double *restrict env_im, size_t n,
+                          double fs_hz, double fc_hz,
+                          double *restrict rf_out) {
+  const double dtheta = 2.0 * M_PI * fc_hz / fs_hz;
+  size_t i;
+#pragma omp parallel for schedule(static)
+  for (i = 0; i < n; ++i) {
+    double theta = (double)i * dtheta;
+    rf_out[i] = env_re[i] * cos(theta) - env_im[i] * sin(theta);
+  }
+}
+
+/* --- SoA downconversion --- */
+
+static size_t mix_down_soa(const double *restrict rf, size_t n, double fs_hz,
+                           double fc_hz, double cutoff_hz, size_t dec_factor,
+                           double *restrict bb_re, double *restrict bb_im,
+                           double *restrict i_raw, double *restrict q_raw) {
+  const double dtheta = 2.0 * M_PI * fc_hz / fs_hz;
+  double alpha;
+  size_t i, out_idx = 0;
+  double i_state = 0.0, q_state = 0.0;
+
+  if (cutoff_hz <= 0.0) cutoff_hz = fs_hz / 16.0;
+  alpha = exp(-2.0 * M_PI * cutoff_hz / fs_hz);
+
+#pragma omp parallel for schedule(static)
+  for (i = 0; i < n; ++i) {
+    double theta = (double)i * dtheta;
+    i_raw[i] = 2.0 * rf[i] * cos(theta);
+    q_raw[i] = -2.0 * rf[i] * sin(theta);
+  }
+
+  for (i = 0; i < n; ++i) {
+    i_state = (1.0 - alpha) * i_raw[i] + alpha * i_state;
+    q_state = (1.0 - alpha) * q_raw[i] + alpha * q_state;
+    if (i % dec_factor == 0) {
+      bb_re[out_idx] = i_state;
+      bb_im[out_idx] = q_state;
+      out_idx++;
+    }
+  }
+  return out_idx;
+}
+
+/* --- SoA pulse shaping --- */
+
+static void shape_symbols_rrc_to_env_soa(const Complex *restrict symbols,
+                                         size_t nsym, int sps, double rolloff,
+                                         double *restrict env_re,
+                                         double *restrict env_im) {
+  const int span = 20;
+  size_t pulse_len, total_len, i, k;
+  double *pulse;
+  double norm_sq = 0.0;
+
+  if (!symbols || !env_re || !env_im || nsym == 0u || sps <= 0)
+    return;
+
+  if (rolloff <= 0.0) {
+    for (i = 0u; i < nsym; ++i) {
+      for (k = 0u; k < (size_t)sps; ++k) {
+        env_re[i * (size_t)sps + k] = symbols[i].re;
+        env_im[i * (size_t)sps + k] = symbols[i].im;
+      }
+    }
+    return;
+  }
+
+  pulse_len = (size_t)span * (size_t)sps + 1u;
+  total_len = nsym * (size_t)sps + pulse_len - 1u;
+  pulse = (double *)calloc(pulse_len, sizeof(double));
+  if (!pulse) {
+    for (i = 0u; i < nsym; ++i) {
+      for (k = 0u; k < (size_t)sps; ++k) {
+        env_re[i * (size_t)sps + k] = symbols[i].re;
+        env_im[i * (size_t)sps + k] = symbols[i].im;
+      }
+    }
+    return;
+  }
+
+  for (k = 0u; k < pulse_len; ++k) {
+    const double t =
+        ((double)k - ((double)pulse_len - 1.0) / 2.0) / (double)sps;
+    const double value = rrc_tap_value(t, rolloff);
+    pulse[k] = value;
+    norm_sq += value * value;
+  }
+
+  if (norm_sq > 0.0) {
+    const double norm = sqrt(norm_sq);
+    for (k = 0u; k < pulse_len; ++k)
+      pulse[k] /= norm;
+  }
+
+  memset(env_re, 0, total_len * sizeof(double));
+  memset(env_im, 0, total_len * sizeof(double));
+  for (i = 0u; i < nsym; ++i) {
+    const size_t base = i * (size_t)sps;
+    for (k = 0u; k < pulse_len; ++k) {
+      const size_t idx = base + k;
+      if (idx >= total_len) break;
+      env_re[idx] += symbols[i].re * pulse[k];
+      env_im[idx] += symbols[i].im * pulse[k];
+    }
+  }
+
+  free(pulse);
 }
 
 /* ============================================================================
@@ -1877,8 +2049,8 @@ static int __attribute__((unused)) simulate_complex_baseband(
     const SimConfig *cfg, const StageModelsConfig *stage_cfg,
     const Complex *tx_symbols, const Complex *constellation_template,
     size_t constellation_count, size_t nsym, StageMetric *metrics,
-    size_t *metric_count, double *final_vpp, const char *csv_run_dir,
-    const char *svg_run_dir) {
+    size_t *metric_count, double *final_vpp, const char *csv_dir,
+    const char *const_dir, const char *trace_dir) {
 
   const StageModel *stages = NULL;
 
@@ -1890,7 +2062,7 @@ static int __attribute__((unused)) simulate_complex_baseband(
   Complex *ref; /* Reference (clean) signal copy */
   Complex *sig; /* Received (noisy) signal copy */
 
-  if (!stages || stage_count == 0u || !csv_run_dir || !svg_run_dir) {
+  if (!stages || stage_count == 0u || !csv_dir || !const_dir || !trace_dir) {
     return -2;
   }
 
@@ -1944,13 +2116,13 @@ static int __attribute__((unused)) simulate_complex_baseband(
     if (N_current_bb > 0.0) {
       metrics[m].snr_db = lin_to_db(P_sig_in_W_bb / N_current_bb);
     }
-    write_constellation_stage_artifacts(csv_run_dir, svg_run_dir, "baseband",
+    write_constellation_stage_artifacts(csv_dir, const_dir, "constellations",
                                         0u, 1, "input", &metrics[m], "Baseband",
                                         constellation_template,
                                         constellation_count, ref, sig, nsym);
     write_complex_trace_stage_artifacts(
-        svg_run_dir, "baseband", 0u, 1, "input", &metrics[m], sig, nsym,
-        cfg->symbol_rate_hz, cfg->symbol_rate_hz);
+        trace_dir, "traces", 0u, 1, "input", &metrics[m], sig, nsym,
+        cfg->symbol_rate_hz, cfg->symbol_rate_hz, -1.0);
     ++m;
   }
 
@@ -1964,14 +2136,14 @@ static int __attribute__((unused)) simulate_complex_baseband(
                                      P_sig_in_W_bb);
 
     /* Write constellation artifacts (CSV data + SVG plot) */
-    write_constellation_stage_artifacts(csv_run_dir, svg_run_dir, "baseband",
+    write_constellation_stage_artifacts(csv_dir, const_dir, "constellations",
                                         i + 1u, 0, stage.name, &metrics[m],
                                         "Baseband", constellation_template,
                                         constellation_count, ref, sig, nsym);
 
     write_complex_trace_stage_artifacts(
-        svg_run_dir, "baseband", i + 1u, 0, stage.name, &metrics[m], sig, nsym,
-        cfg->symbol_rate_hz, cfg->symbol_rate_hz);
+        trace_dir, "traces", i + 1u, 0, stage.name, &metrics[m], sig, nsym,
+        cfg->symbol_rate_hz, cfg->symbol_rate_hz, -1.0);
     ++m;
   }
 
@@ -2029,7 +2201,7 @@ static int simulate_bruteforce_rf(
     const Complex *tx_symbols, const Complex *constellation_template,
     size_t constellation_count, size_t nsym, StageMetric *metrics,
     size_t *metric_count, double *final_vpp, int *used_sps, double *used_fs_hz,
-    const char *csv_run_dir, const char *svg_run_dir) {
+    const char *csv_dir, const char *const_dir, const char *trace_dir) {
 
   const StageModel *rf_stages = NULL;
   const StageModel *bb_stages = NULL;
@@ -2053,19 +2225,29 @@ static int simulate_bruteforce_rf(
   const double P_sig_in_W = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ *
                             db_to_lin(cfg->input_snr_db);
 
-  /* Working buffers */
-  Complex *env = NULL;           /* Upsampled complex envelope */
-  double *rf_ref = NULL;         /* Reference RF waveform (clean) */
-  double *rf_sig = NULL;         /* Received RF waveform (noisy) */
-  Complex *bb_ref_stream = NULL; /* Downconverted reference at RF sample rate */
-  Complex *bb_sig_stream = NULL; /* Downconverted signal at RF sample rate */
-  Complex *bb_ref_hr = NULL;    /* High-rate baseband for dense traces */
-  Complex *bb_sig_hr = NULL;    /* High-rate baseband for dense traces */
-  Complex *ref_sym = NULL;       /* Downsampled reference at symbol rate */
-  Complex *sig_sym = NULL;       /* Downsampled signal at symbol rate */
+  /* Working buffers — SoA layout for large Complex arrays */
+  double *env_re = NULL;        /* Upsampled envelope real part */
+  double *env_im = NULL;        /* Upsampled envelope imag part */
+  double *rf_ref = NULL;        /* Reference RF waveform (clean) */
+  double *rf_sig = NULL;        /* Received RF waveform (noisy) */
+  double *bb_ref_re = NULL;     /* Baseband reference real part */
+  double *bb_ref_im = NULL;     /* Baseband reference imag part */
+  double *bb_sig_re = NULL;     /* Baseband signal real part */
+  double *bb_sig_im = NULL;     /* Baseband signal imag part */
+  Complex *ref_sym = NULL;      /* Small: stays as Complex */
+  Complex *sig_sym = NULL;
+  double *temp_bb_ref_re = NULL;
+  double *temp_bb_ref_im = NULL;
+  double *temp_bb_sig_re = NULL;
+  double *temp_bb_sig_im = NULL;
+  Complex *temp_ref_sym = NULL;
+  Complex *temp_sig_sym = NULL;
+  Complex *temp_complex_buf = NULL;
+  double *i_raw = NULL;           /* Mix-down raw I channel (pre-IIR) */
+  double *q_raw = NULL;           /* Mix-down raw Q channel (pre-IIR) */
 
   if (!rf_stages || !bb_stages || rf_stage_count == 0u ||
-      bb_stage_count == 0u || !csv_run_dir || !svg_run_dir) {
+      bb_stage_count == 0u || !csv_dir || !const_dir || !trace_dir) {
     return -2;
   }
 
@@ -2090,10 +2272,7 @@ static int simulate_bruteforce_rf(
   size_t dec_factor = sps / bb_sps;
   if (dec_factor < 1)
     dec_factor = 1;
-  if (dec_factor < 1)
-    dec_factor = 1;
-  size_t pulse_len =
-      (cfg->rolloff > 0.0) ? ((size_t)6 * (size_t)sps + 1u) : 1u;
+  size_t pulse_len = (cfg->rolloff > 0.0) ? ((size_t)6 * (size_t)sps + 1u) : 1u;
 
   fs_hz = cfg->symbol_rate_hz * (double)sps; /* Actual sampling frequency */
   nrf = nsym * (size_t)sps + pulse_len -
@@ -2101,248 +2280,233 @@ static int simulate_bruteforce_rf(
   size_t nbb = (nrf + dec_factor - 1u) /
                dec_factor; /* Total decimated baseband samples */
 
-  /* Allocate all working buffers - use nrf for full rate post-mix (matching old) */
-  env = (Complex *)calloc(nrf, sizeof(Complex));
-  rf_ref = (double *)calloc(nrf, sizeof(double));
-  rf_sig = (double *)calloc(nrf, sizeof(double));
-  bb_ref_stream = (Complex *)calloc(nrf, sizeof(Complex)); /* Full rate like old */
-  bb_sig_stream = (Complex *)calloc(nrf, sizeof(Complex)); /* Full rate like old */
+  /* Allocate all working buffers — SoA layout for large arrays */
+  env_re = ALLOC_ALIGNED_D(nrf);
+  env_im = ALLOC_ALIGNED_D(nrf);
+  rf_ref = ALLOC_ALIGNED_D(nrf);
+  rf_sig = ALLOC_ALIGNED_D(nrf);
+  bb_ref_re = ALLOC_ALIGNED_D(nrf);
+  bb_ref_im = ALLOC_ALIGNED_D(nrf);
+  bb_sig_re = ALLOC_ALIGNED_D(nrf);
+  bb_sig_im = ALLOC_ALIGNED_D(nrf);
   ref_sym = (Complex *)calloc(nsym, sizeof(Complex));
   sig_sym = (Complex *)calloc(nsym, sizeof(Complex));
 
-  if (!env || !rf_ref || !rf_sig || !bb_ref_stream || !bb_sig_stream ||
+  if (!env_re || !env_im || !rf_ref || !rf_sig ||
+      !bb_ref_re || !bb_ref_im || !bb_sig_re || !bb_sig_im ||
       !ref_sym || !sig_sym) {
-    /* Clean up on allocation failure */
-    free(env);
-    free(rf_ref);
-    free(rf_sig);
-    free(bb_ref_stream);
-    free(bb_sig_stream);
-    free(ref_sym);
-    free(sig_sym);
+    free(env_re); free(env_im); free(rf_ref); free(rf_sig);
+    free(bb_ref_re); free(bb_ref_im); free(bb_sig_re); free(bb_sig_im);
+    free(ref_sym); free(sig_sym);
     return -1;
   }
 
-  /* Step 1: Pulse-shape symbols at the RF rate (RRC, like MATLAB) */
-  shape_symbols_rrc_to_env(tx_symbols, nsym, sps, cfg->rolloff, env);
+  /* Preallocate temp buffers — SoA for large, Complex for small */
+  temp_bb_ref_re = ALLOC_ALIGNED_D(nbb);
+  temp_bb_ref_im = ALLOC_ALIGNED_D(nbb);
+  temp_bb_sig_re = ALLOC_ALIGNED_D(nbb);
+  temp_bb_sig_im = ALLOC_ALIGNED_D(nbb);
+  temp_ref_sym = (Complex *)calloc(nsym, sizeof(Complex));
+  temp_sig_sym = (Complex *)calloc(nsym, sizeof(Complex));
+  temp_complex_buf = (Complex *)calloc(nrf > nbb ? nrf : nbb, sizeof(Complex));
+  i_raw = ALLOC_ALIGNED_D(nrf);
+  q_raw = ALLOC_ALIGNED_D(nrf);
 
-  /* Map the shaped waveform onto the physical input power level
-   * (MATLAB-aligned). */
+  if (!temp_bb_ref_re || !temp_bb_ref_im || !temp_bb_sig_re || !temp_bb_sig_im ||
+      !temp_ref_sym || !temp_sig_sym || !temp_complex_buf || !i_raw || !q_raw) {
+    free(env_re); free(env_im); free(rf_ref); free(rf_sig);
+    free(bb_ref_re); free(bb_ref_im); free(bb_sig_re); free(bb_sig_im);
+    free(ref_sym); free(sig_sym);
+    free(temp_bb_ref_re); free(temp_bb_ref_im);
+    free(temp_bb_sig_re); free(temp_bb_sig_im);
+    free(temp_ref_sym); free(temp_sig_sym);
+    free(temp_complex_buf);
+    free(i_raw); free(q_raw);
+    return -1;
+  }
+
+  prng_init_parallel((uint32_t)cfg->seed);
+
+  double t0 = omp_get_wtime();
+  double t_pulse = 0, t_rf_stages = 0, t_downconv = 0, t_bb_stages = 0;
+
+  /* Step 1: Pulse-shape symbols at the RF rate (RRC, like MATLAB) — SoA */
+  shape_symbols_rrc_to_env_soa(tx_symbols, nsym, sps, cfg->rolloff, env_re, env_im);
+
+  /* Map the shaped waveform onto the physical input power level (SoA) */
   {
     const double local_noise_w = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
     const double tx_signal_w = local_noise_w * db_to_lin(cfg->input_snr_db);
     const double tx_target_mean_square_v = tx_signal_w * R_LOAD_OHM;
-    const double tx_current_mean_square_v = mean_power_complex(env, nrf);
+    const double tx_current_mean_square_v = mean_power_soa(env_re, env_im, nrf);
 
     if (tx_current_mean_square_v > 0.0 && tx_target_mean_square_v > 0.0) {
-      scale_complex(env, nrf,
-                    sqrt(tx_target_mean_square_v / tx_current_mean_square_v));
+      scale_soa(env_re, env_im, nrf,
+                sqrt(tx_target_mean_square_v / tx_current_mean_square_v));
     }
   }
 
-  /* Step 2: Add antenna noise to the COMPLEX ENVELOPE (before upconversion)
-   * This exactly matches MATLAB's approach:
-   *   noise_in = sqrt((P_noise_in_W * R_load) / 2) * (randn + j*randn)
-   *   rx_chain = sig_in + noise_in
-   *
-   * By adding noise in the complex domain, we avoid all RF bandwidth
-   * correction issues. The noise power is P_noise = k_B * T_ant * B_noise *
-   * R_load.
-   */
+  /* Step 2: Add antenna noise to envelope, then upconvert — SoA */
   {
-    /* Allocate a noisy copy of the envelope */
-    Complex *env_noisy = (Complex *)calloc(nrf, sizeof(Complex));
-    if (!env_noisy) {
-      free(env);
-      free(rf_ref);
-      free(rf_sig);
-      free(bb_ref_stream);
-      free(bb_sig_stream);
-      free(ref_sym);
-      free(sig_sym);
+    double *env_noisy_re = ALLOC_ALIGNED_D(nrf);
+    double *env_noisy_im = ALLOC_ALIGNED_D(nrf);
+    if (!env_noisy_re || !env_noisy_im) {
+      free(env_re); free(env_im); free(rf_ref); free(rf_sig);
+      free(bb_ref_re); free(bb_ref_im); free(bb_sig_re); free(bb_sig_im);
+      free(ref_sym); free(sig_sym); free(temp_complex_buf);
+      free(temp_bb_ref_re); free(temp_bb_ref_im);
+      free(temp_bb_sig_re); free(temp_bb_sig_im);
+      free(temp_ref_sym); free(temp_sig_sym);
+      free(i_raw); free(q_raw);
+      free(env_noisy_re); free(env_noisy_im);
       return -1;
     }
-    copy_complex(env_noisy, env, nrf);
+    memcpy(env_noisy_re, env_re, nrf * sizeof(double));
+    memcpy(env_noisy_im, env_im, nrf * sizeof(double));
 
-    /* Add antenna noise (MATLAB-exact): k_B * T_ant * B_noise * R_load */
     {
       const double P_noise_v2 =
           K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ * R_LOAD_OHM;
-      add_awgn_complex(env_noisy, nrf, P_noise_v2);
+      add_awgn_soa(env_noisy_re, env_noisy_im, nrf, P_noise_v2);
     }
 
-    /* Step 3: IQ-modulate both clean and noisy envelopes onto 24 GHz carrier */
-    env_to_rf_real(env, nrf, fs_hz, cfg->carrier_hz,
-                   rf_ref); /* Clean reference */
-    env_to_rf_real(env_noisy, nrf, fs_hz, cfg->carrier_hz,
-                   rf_sig); /* Noisy signal */
-    free(env_noisy);
+    /* Step 3: IQ-modulate both clean and noisy envelopes — SoA */
+    env_to_rf_soa(env_re, env_im, nrf, fs_hz, cfg->carrier_hz, rf_ref);
+    env_to_rf_soa(env_noisy_re, env_noisy_im, nrf, fs_hz, cfg->carrier_hz, rf_sig);
+    free(env_noisy_re);
+    free(env_noisy_im);
   }
 
   /* Step 5: Record the INPUT RF trace metric */
   {
     metrics[m] =
         compute_metric_real("input_rf", "rf_real", rf_ref, rf_sig, nrf);
-    metrics[m].signal_power = P_sig_in_W; /* Absolute input power */
-    /* Override with analytic Friis SNR */
+    metrics[m].signal_power = P_sig_in_W;
     if (N_current > 0.0) {
       metrics[m].snr_db = lin_to_db(P_sig_in_W / N_current);
     }
-    write_trace_stage_artifacts(csv_run_dir, svg_run_dir, "rf", 0u, 1,
+    write_trace_stage_artifacts(csv_dir, trace_dir, "traces", 0u, 1,
                                 "input_rf", &metrics[m], "RF", rf_ref, rf_sig,
                                 nrf, 24000u, fs_hz, cfg->carrier_hz);
 
     {
-      Complex *temp_bb_ref = (Complex *)calloc(nbb, sizeof(Complex));
-      Complex *temp_bb_sig = (Complex *)calloc(nbb, sizeof(Complex));
-      Complex *temp_ref_sym = (Complex *)calloc(nsym, sizeof(Complex));
-      Complex *temp_sig_sym = (Complex *)calloc(nsym, sizeof(Complex));
+      const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
+      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
+      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
-      if (temp_bb_ref && temp_bb_sig && temp_ref_sym && temp_sig_sym) {
-        const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-        mix_down_and_lowpass(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                             dec_factor, temp_bb_ref);
-        mix_down_and_lowpass(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                             dec_factor, temp_bb_sig);
+      /* Pack SoA → Complex for synchronize_and_downsample */
+      pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
+      size_t temp_ref_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_ref_sym);
+      pack_complex(temp_bb_sig_re, temp_bb_sig_im, nbb, temp_complex_buf);
+      size_t temp_sig_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_sig_sym);
+      size_t temp_eval_n =
+          (temp_ref_n < temp_sig_n) ? temp_ref_n : temp_sig_n;
 
-        size_t temp_ref_n =
-            synchronize_and_downsample(temp_bb_ref, nbb, nsym, bb_sps,
-                                       cfg->rolloff, tx_symbols, temp_ref_sym);
-        size_t temp_sig_n =
-            synchronize_and_downsample(temp_bb_sig, nbb, nsym, bb_sps,
-                                       cfg->rolloff, tx_symbols, temp_sig_sym);
-        size_t temp_eval_n =
-            (temp_ref_n < temp_sig_n) ? temp_ref_n : temp_sig_n;
+      StageMetric temp_metric = compute_metric_complex(
+          "input_rf", "rf_to_bb", temp_ref_sym, temp_sig_sym, temp_eval_n);
+      metrics[m].evm_pct = temp_metric.evm_pct;
 
-        /* MATLAB parity: compare against reference that went through same
-         * pulse shaping and downconversion, not raw tx_symbols */
-        StageMetric temp_metric = compute_metric_complex(
-            "input_rf", "rf_to_bb", temp_ref_sym, temp_sig_sym, temp_eval_n);
-        metrics[m].evm_pct = temp_metric.evm_pct;
-        /* Keep Friis analytic SNR from line 2025, only take EVM */
-
-        write_constellation_stage_artifacts(
-            csv_run_dir, svg_run_dir, "rf", 0u, 1, "input_rf", &metrics[m],
-            "RF", constellation_template, constellation_count, tx_symbols,
-            temp_sig_sym, temp_eval_n);
-      }
-      if (temp_bb_ref)
-        free(temp_bb_ref);
-      if (temp_bb_sig)
-        free(temp_bb_sig);
-      if (temp_ref_sym)
-        free(temp_ref_sym);
-      if (temp_sig_sym)
-        free(temp_sig_sym);
+      write_constellation_stage_artifacts(
+          csv_dir, const_dir, "constellations", 0u, 1, "input_rf", &metrics[m],
+          "RF", constellation_template, constellation_count, tx_symbols,
+          temp_sig_sym, temp_eval_n);
     }
 
     ++m;
   }
+
+  t_pulse = omp_get_wtime();
 
   /* Step 6: Process through RF frontend stages */
   for (i = 0u; i < rf_stage_count; ++i) {
     StageModel stage = rf_stages[i];
 
     metrics[m] =
-        apply_stage_real(&stage, rf_ref, rf_sig, nrf, "rf_real", N_t0_W, fs_hz,
+        apply_stage_real_fused(&stage, rf_ref, rf_sig, nrf, "rf_real", N_t0_W, fs_hz,
                          cfg->carrier_hz, &N_current, &Gain_total, P_sig_in_W);
     metrics[m].signal_power =
         P_sig_in_W * Gain_total; /* Align with Friis model */
-    write_trace_stage_artifacts(csv_run_dir, svg_run_dir, "rf", i + 1u, 0,
+    write_trace_stage_artifacts(csv_dir, trace_dir, "traces", i + 1u, 0,
                                 stage.name, &metrics[m], "RF", rf_ref, rf_sig,
                                 nrf, 6000u, fs_hz, cfg->carrier_hz);
 
-    /* Generate Constellation & EVM for all RF Stages */
-    if (i < rf_stage_count) {
-      Complex *temp_bb_ref = (Complex *)calloc(nbb, sizeof(Complex));
-      Complex *temp_bb_sig = (Complex *)calloc(nbb, sizeof(Complex));
-      Complex *temp_ref_sym = (Complex *)calloc(nsym, sizeof(Complex));
-      Complex *temp_sig_sym = (Complex *)calloc(nsym, sizeof(Complex));
+    /* Generate Constellation & EVM for all RF Stages (SoA) */
+    {
+      const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
+      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
+      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
-      if (temp_bb_ref && temp_bb_sig && temp_ref_sym && temp_sig_sym) {
-        const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-        mix_down_and_lowpass(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                             dec_factor, temp_bb_ref);
-        mix_down_and_lowpass(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                             dec_factor, temp_bb_sig);
+      pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
+      size_t temp_ref_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_ref_sym);
+      pack_complex(temp_bb_sig_re, temp_bb_sig_im, nbb, temp_complex_buf);
+      size_t temp_sig_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_sig_sym);
+      size_t temp_eval_n =
+          (temp_ref_n < temp_sig_n) ? temp_ref_n : temp_sig_n;
 
-        size_t temp_ref_n =
-            synchronize_and_downsample(temp_bb_ref, nbb, nsym, bb_sps,
-                                       cfg->rolloff, tx_symbols, temp_ref_sym);
-        size_t temp_sig_n =
-            synchronize_and_downsample(temp_bb_sig, nbb, nsym, bb_sps,
-                                       cfg->rolloff, tx_symbols, temp_sig_sym);
-        size_t temp_eval_n =
-            (temp_ref_n < temp_sig_n) ? temp_ref_n : temp_sig_n;
+      StageMetric temp_metric = compute_metric_complex(
+          stage.name, "rf_to_bb", tx_symbols, temp_sig_sym, temp_eval_n);
+      metrics[m].evm_pct = temp_metric.evm_pct;
 
-        StageMetric temp_metric = compute_metric_complex(
-            stage.name, "rf_to_bb", tx_symbols, temp_sig_sym, temp_eval_n);
-        metrics[m].evm_pct = temp_metric.evm_pct;
-        /* Keep Friis analytic SNR, only take EVM */
-
-        write_constellation_stage_artifacts(
-            csv_run_dir, svg_run_dir, "rf", i + 1u, 0, stage.name, &metrics[m],
-            "RF", constellation_template, constellation_count, tx_symbols,
-            temp_sig_sym, temp_eval_n);
-      }
-      if (temp_bb_ref)
-        free(temp_bb_ref);
-      if (temp_bb_sig)
-        free(temp_bb_sig);
-      if (temp_ref_sym)
-        free(temp_ref_sym);
-      if (temp_sig_sym)
-        free(temp_sig_sym);
+      write_constellation_stage_artifacts(
+          csv_dir, const_dir, "constellations", i + 1u, 0, stage.name, &metrics[m],
+          "RF", constellation_template, constellation_count, tx_symbols,
+          temp_sig_sym, temp_eval_n);
     }
 
     ++m;
   }
 
-  /* Step 7: Downconvert RF → complex baseband */
-  {
-    /*
-     * Low-pass cutoff = 0.75 × Nyquist bandwidth.
-     * Nyquist BW = symbol_rate × (1 + rolloff).
-     * The 0.75 factor provides margin to reject the image band while
-     * keeping all in-band signal energy.
-     */
-    const double cutoff_hz =
-        5.0 * cfg->symbol_rate_hz; /* Wide enough to avoid ISI, matched filter
-                                      provides noise rejection */
-    /* Full-rate downconversion for display parity with old version */
-    mix_down_and_lowpass(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                         1, bb_ref_stream);
-    mix_down_and_lowpass(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
-                         1, bb_sig_stream);
-    }
+  t_rf_stages = omp_get_wtime();
 
-  /* Step 8: Extract symbol-rate samples - use nrf since we're at full rate */
+  /* Step 7: Downconvert RF → complex baseband — SoA */
   {
+    const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
+    mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                 dec_factor, bb_ref_re, bb_ref_im, i_raw, q_raw);
+    mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                 dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
+  }
+
+  t_downconv = omp_get_wtime();
+
+  /* Step 8: Extract symbol-rate samples */
+  {
+    pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
     size_t ref_eval_n = synchronize_and_downsample(
-        bb_ref_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
     size_t sig_eval_n = synchronize_and_downsample(
-        bb_sig_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
     size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
-    (void)eval_n; /* Used only for future diagnostics */
+    (void)eval_n;
 
-    /* Step 9: Record the downconversion metric and constellation */
-    /* MATLAB parity: compare against reference that went through same processing */
     metrics[m] = compute_metric_complex("MIX2_Downconv", "rf_to_bb", ref_sym,
                                         sig_sym, ref_eval_n);
     metrics[m].signal_power = P_sig_in_W * Gain_total;
-    /* Override with analytic Friis SNR (mixer is lossless in the Friis model)
-     */
     if (N_current > 0.0) {
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
     }
     write_constellation_stage_artifacts(
-        csv_run_dir, svg_run_dir, "rf", rf_stage_count + 1u, 0,
+        csv_dir, const_dir, "constellations", rf_stage_count + 1u, 0,
         metrics[m].stage, &metrics[m], "RF", constellation_template,
         constellation_count, tx_symbols, sig_sym, sig_eval_n);
+    /* Pack for trace artifacts */
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
     write_complex_trace_stage_artifacts(
-        svg_run_dir, "rf", rf_stage_count + 1u, 0, metrics[m].stage,
-        &metrics[m], bb_sig_stream, nrf, fs_hz,
-        cfg->symbol_rate_hz);
+        trace_dir, "traces", rf_stage_count + 1u, 0, metrics[m].stage,
+        &metrics[m], temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
     ++m;
   }
 
@@ -2362,34 +2526,31 @@ static int simulate_bruteforce_rf(
      */
     if (strstr(stage.name, "LNA 3") || strstr(stage.name, "lna3") ||
         strstr(stage.name, "post_05")) {
-      double p_mean = mean_power_complex(bb_sig_stream, nrf);
+      double p_mean = mean_power_soa(bb_sig_re, bb_sig_im, nbb);
       double v_rms = sqrt(p_mean);
-      double v_pp_est = v_rms * 2.0 * sqrt(2.0); /* For sinusoids/QAM */
+      double v_pp_est = v_rms * 2.0 * sqrt(2.0);
       double target_vpp = 1.0;
       if (v_pp_est > 1e-9) {
         double g_extra_db = 20.0 * log10(target_vpp / v_pp_est);
-        if (g_extra_db < -20.0)
-          g_extra_db = -20.0;
-        if (g_extra_db > 20.0)
-          g_extra_db = 20.0;
+        if (g_extra_db < -20.0) g_extra_db = -20.0;
+        if (g_extra_db > 20.0) g_extra_db = 20.0;
         stage.gain_db += g_extra_db;
       }
     }
 
-    apply_stage_complex(&stage, bb_ref_stream, bb_sig_stream, nrf, "rf_to_bb",
-                        N_t0_W, &N_current, &Gain_total, P_sig_in_W);
+    apply_stage_soa(&stage, bb_ref_re, bb_ref_im, bb_sig_re, bb_sig_im, nbb,
+                    "rf_to_bb", N_t0_W, &N_current, &Gain_total, P_sig_in_W);
 
-    /*
-     * Now extract the symbol centers from the cleanly filtered waveform
-     * to compute the metrics and generate the plots.
-     */
+    pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
     size_t ref_eval_n = synchronize_and_downsample(
-        bb_ref_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
     size_t sig_eval_n = synchronize_and_downsample(
-        bb_sig_stream, nrf, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
     size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
 
-    /* MATLAB parity: compare against reference that went through same processing */
+    /* MATLAB parity: compare against reference that went through same
+     * processing */
     metrics[m] = compute_metric_complex(stage.name, "rf_to_bb", ref_sym,
                                         sig_sym, eval_n);
     metrics[m].signal_power = P_sig_in_W * Gain_total;
@@ -2403,12 +2564,13 @@ static int simulate_bruteforce_rf(
     }
 
     write_constellation_stage_artifacts(
-        csv_run_dir, svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name,
+        csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, stage.name,
         &metrics[m], "RF", constellation_template, constellation_count,
         tx_symbols, sig_sym, eval_n);
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
     write_complex_trace_stage_artifacts(
-        svg_run_dir, "rf", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
-        bb_sig_stream, nrf, fs_hz, cfg->symbol_rate_hz);
+        trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
     ++m;
   }
 
@@ -2418,14 +2580,603 @@ static int simulate_bruteforce_rf(
   *used_sps = sps;
   *used_fs_hz = fs_hz;
 
+  t_bb_stages = omp_get_wtime();
+
+  double total = t_bb_stages - t0;
+  fprintf(stderr, "\n=== TIMING (16 threads) ===\n");
+  fprintf(stderr, "Pulse shaping + upconv + input metric: %.2fs (%.1f%%)\n", t_pulse - t0, (t_pulse - t0) / total * 100);
+  fprintf(stderr, "RF stages (%zu): %.2fs (%.1f%%)\n", (size_t)rf_stage_count, t_rf_stages - t_pulse, (t_rf_stages - t_pulse) / total * 100);
+  fprintf(stderr, "Downconversion: %.2fs (%.1f%%)\n", t_downconv - t_rf_stages, (t_downconv - t_rf_stages) / total * 100);
+  fprintf(stderr, "BB stages (%zu): %.2fs (%.1f%%)\n", (size_t)bb_stage_count, t_bb_stages - t_downconv, (t_bb_stages - t_downconv) / total * 100);
+  fprintf(stderr, "Total: %.2fs\n", total);
+
+  /* Clean up all working buffers — SoA */
+  free(env_re); free(env_im);
+  free(rf_ref); free(rf_sig);
+  free(bb_ref_re); free(bb_ref_im);
+  free(bb_sig_re); free(bb_sig_im);
+  free(ref_sym); free(sig_sym);
+  free(temp_bb_ref_re); free(temp_bb_ref_im);
+  free(temp_bb_sig_re); free(temp_bb_sig_im);
+  free(temp_ref_sym); free(temp_sig_sym);
+  free(temp_complex_buf);
+  free(i_raw); free(q_raw);
+  return 0;
+}
+
+/*
+ * simulate_realistic_rf — Run the realistic RF simulation with 8 impairment models
+ *
+ * What it does:
+ *   This is the full "realistic" simulation that models actual RF impairments:
+ *   LO phase noise, I/Q imbalance, flicker noise, biquad filters, AM-to-PM,
+ *   ADC quantization+jitter, and LO leakage DC offset.
+ *
+ * Signal flow:
+ *   1. Generate symbols (same as RF path)
+ *   2. Add antenna thermal noise (same as RF path)
+ *   3. Pulse shape with RRC (same as RF path)
+ *   4. Apply LO phase noise before upconversion (phase_noise module)
+ *   5. Upconvert to RF (same as RF path)
+ *   6. Process through RF frontend stages with AM-to-PM (from Task 7)
+ *   7. Apply LO phase noise at mixer (phase_noise module)
+ *   8. Downconvert to baseband (same as RF path)
+ *   9. Apply I/Q imbalance after downconversion (iq_imbalance module)
+ *  10. Process through post-mix BB stages with biquad filters (biquad_filter module)
+ *  11. Add flicker noise to baseband stages (flicker_noise module)
+ *  12. Apply ADC model at final stage (adc_model module)
+ *  13. Add LO leakage DC offset (simple addition)
+ *
+ * Parameters:
+ *   Same as simulate_bruteforce_rf
+ *
+ * Returns:
+ *   0 on success, -1 on memory error, -2 if chains missing, -3 if MAX_METRICS exceeded
+ */
+static int simulate_realistic_rf(
+    const SimConfig *cfg, const StageModelsConfig *stage_cfg,
+    const Complex *tx_symbols, const Complex *constellation_template,
+    size_t constellation_count, size_t nsym, StageMetric *metrics,
+    size_t *metric_count, double *final_vpp, int *used_sps, double *used_fs_hz,
+    const char *csv_dir, const char *const_dir, const char *trace_dir) {
+
+  const StageModel *rf_stages = NULL;
+  const StageModel *bb_stages = NULL;
+  const size_t rf_stage_count =
+      stage_models_get(stage_cfg, STAGE_CHAIN_RF_FRONTEND, &rf_stages);
+  const size_t bb_stage_count =
+      stage_models_get(stage_cfg, STAGE_CHAIN_RF_POSTMIX_BB, &bb_stages);
+
+  int sps;
+  double fs_hz;
+  size_t nrf;
+  size_t m = 0u;
+  size_t i;
+
+  const double N_t0_W = K_BOLTZMANN * cfg->t0_k * B_NOISE_HZ;
+  double N_current = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
+  double Gain_total = 1.0;
+  const double P_sig_in_W = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ *
+                            db_to_lin(cfg->input_snr_db);
+
+  /* Working buffers — SoA layout */
+  double *env_re = NULL;
+  double *env_im = NULL;
+  double *rf_ref = NULL;
+  double *rf_sig = NULL;
+  double *bb_ref_re = NULL;
+  double *bb_ref_im = NULL;
+  double *bb_sig_re = NULL;
+  double *bb_sig_im = NULL;
+  Complex *ref_sym = NULL;
+  Complex *sig_sym = NULL;
+  double *temp_bb_ref_re = NULL;
+  double *temp_bb_ref_im = NULL;
+  double *temp_bb_sig_re = NULL;
+  double *temp_bb_sig_im = NULL;
+  Complex *temp_ref_sym = NULL;
+  Complex *temp_sig_sym = NULL;
+  Complex *temp_complex_buf = NULL;
+  double *i_raw = NULL;
+  double *q_raw = NULL;
+
+  /* Impairment module configs */
+  PhaseNoiseConfig tx_lo_pn = {0};
+  PhaseNoiseConfig rx_lo_pn = {0};
+  IQImbalanceConfig iq_cfg = {0};
+  FlickerNoiseConfig flicker_cfg = {0};
+  ADCModelConfig adc_cfg = {0};
+  BiquadState bb_filter_state = {0};
+
+  if (!rf_stages || !bb_stages || rf_stage_count == 0u ||
+      bb_stage_count == 0u || !csv_dir || !const_dir || !trace_dir) {
+    return -2;
+  }
+
+  if (rf_stage_count + bb_stage_count + 2u > (size_t)MAX_METRICS) {
+    fprintf(
+        stderr,
+        "RF chain has %zu+%zu stages; increase MAX_METRICS (currently %d)\n",
+        rf_stage_count, bb_stage_count, MAX_METRICS);
+    return -3;
+  }
+
+  sps = (int)llround(cfg->rf_sample_rate_hz / cfg->symbol_rate_hz);
+  if (sps < 16) {
+    sps = 16;
+  }
+
+  size_t bb_sps = 8;
+  size_t dec_factor = sps / bb_sps;
+  if (dec_factor < 1)
+    dec_factor = 1;
+  size_t pulse_len = (cfg->rolloff > 0.0) ? ((size_t)6 * (size_t)sps + 1u) : 1u;
+
+  fs_hz = cfg->symbol_rate_hz * (double)sps;
+  nrf = nsym * (size_t)sps + pulse_len - 1u;
+  size_t nbb = (nrf + dec_factor - 1u) / dec_factor;
+
+  /* Allocate all working buffers */
+  env_re = ALLOC_ALIGNED_D(nrf);
+  env_im = ALLOC_ALIGNED_D(nrf);
+  rf_ref = ALLOC_ALIGNED_D(nrf);
+  rf_sig = ALLOC_ALIGNED_D(nrf);
+  bb_ref_re = ALLOC_ALIGNED_D(nrf);
+  bb_ref_im = ALLOC_ALIGNED_D(nrf);
+  bb_sig_re = ALLOC_ALIGNED_D(nrf);
+  bb_sig_im = ALLOC_ALIGNED_D(nrf);
+  ref_sym = (Complex *)calloc(nsym, sizeof(Complex));
+  sig_sym = (Complex *)calloc(nsym, sizeof(Complex));
+
+  if (!env_re || !env_im || !rf_ref || !rf_sig ||
+      !bb_ref_re || !bb_ref_im || !bb_sig_re || !bb_sig_im ||
+      !ref_sym || !sig_sym) {
+    free(env_re); free(env_im); free(rf_ref); free(rf_sig);
+    free(bb_ref_re); free(bb_ref_im); free(bb_sig_re); free(bb_sig_im);
+    free(ref_sym); free(sig_sym);
+    return -1;
+  }
+
+  /* Preallocate temp buffers */
+  temp_bb_ref_re = ALLOC_ALIGNED_D(nbb);
+  temp_bb_ref_im = ALLOC_ALIGNED_D(nbb);
+  temp_bb_sig_re = ALLOC_ALIGNED_D(nbb);
+  temp_bb_sig_im = ALLOC_ALIGNED_D(nbb);
+  temp_ref_sym = (Complex *)calloc(nsym, sizeof(Complex));
+  temp_sig_sym = (Complex *)calloc(nsym, sizeof(Complex));
+  temp_complex_buf = (Complex *)calloc(nrf > nbb ? nrf : nbb, sizeof(Complex));
+  i_raw = ALLOC_ALIGNED_D(nrf);
+  q_raw = ALLOC_ALIGNED_D(nrf);
+
+  if (!temp_bb_ref_re || !temp_bb_ref_im || !temp_bb_sig_re || !temp_bb_sig_im ||
+      !temp_ref_sym || !temp_sig_sym || !temp_complex_buf || !i_raw || !q_raw) {
+    free(env_re); free(env_im); free(rf_ref); free(rf_sig);
+    free(bb_ref_re); free(bb_ref_im); free(bb_sig_re); free(bb_sig_im);
+    free(ref_sym); free(sig_sym);
+    free(temp_bb_ref_re); free(temp_bb_ref_im);
+    free(temp_bb_sig_re); free(temp_bb_sig_im);
+    free(temp_ref_sym); free(temp_sig_sym);
+    free(temp_complex_buf);
+    free(i_raw); free(q_raw);
+    return -1;
+  }
+
+  /* Initialize impairment modules */
+  {
+    /* TX LO phase noise */
+    tx_lo_pn.white_floor_dbc_hz = -155.0;
+    tx_lo_pn.f2_corner_hz = 100e3;
+    tx_lo_pn.f3_corner_hz = 10e3;
+    tx_lo_pn.f2_slope_dbc_hz = -100.0;
+    tx_lo_pn.f3_slope_dbc_hz = -80.0;
+    tx_lo_pn.sample_rate_hz = fs_hz;
+    if (phase_noise_init(&tx_lo_pn) != 0) {
+      fprintf(stderr, "Failed to init TX LO phase noise\n");
+      goto cleanup;
+    }
+
+    /* RX LO phase noise */
+    rx_lo_pn.white_floor_dbc_hz = -150.0;
+    rx_lo_pn.f2_corner_hz = 50e3;
+    rx_lo_pn.f3_corner_hz = 5e3;
+    rx_lo_pn.f2_slope_dbc_hz = -95.0;
+    rx_lo_pn.f3_slope_dbc_hz = -75.0;
+    rx_lo_pn.sample_rate_hz = fs_hz;
+    if (phase_noise_init(&rx_lo_pn) != 0) {
+      fprintf(stderr, "Failed to init RX LO phase noise\n");
+      goto cleanup;
+    }
+
+    /* I/Q imbalance from first BB stage if available */
+    iq_cfg.gain_error_db = 0.3;
+    iq_cfg.phase_error_deg = 1.5;
+    if (bb_stage_count > 0) {
+      if (bb_stages[0].iq_gain_error_db > 0.0 || bb_stages[0].iq_phase_error_deg > 0.0) {
+        iq_cfg.gain_error_db = bb_stages[0].iq_gain_error_db;
+        iq_cfg.phase_error_deg = bb_stages[0].iq_phase_error_deg;
+      }
+    }
+
+    /* Flicker noise */
+    flicker_cfg.corner_freq_hz = 1000.0;
+    flicker_cfg.white_noise_power = 1e-12;
+    flicker_cfg.sample_rate_hz = fs_hz / (double)dec_factor;
+    if (flicker_noise_init(&flicker_cfg) != 0) {
+      fprintf(stderr, "Failed to init flicker noise\n");
+      goto cleanup;
+    }
+
+    /* ADC model */
+    adc_cfg.bit_depth = 12;
+    adc_cfg.full_scale_vpp = 1.0;
+    adc_cfg.jitter_ps = 1.0;
+    if (adc_model_init(&adc_cfg) != 0) {
+      fprintf(stderr, "Failed to init ADC model\n");
+      goto cleanup;
+    }
+
+    /* Biquad filter for BB stages */
+    {
+      BiquadConfig bq_cfg = {0};
+      double fs_bb = fs_hz / (double)dec_factor;
+      bq_cfg.cutoff_hz = 0.4 * fs_bb;
+      bq_cfg.fs_hz = fs_bb;
+      bq_cfg.order = 4;
+      if (biquad_init(&bb_filter_state, &bq_cfg) != 0) {
+        fprintf(stderr, "Failed to init biquad filter\n");
+        goto cleanup;
+      }
+    }
+  }
+
+  prng_init_parallel((uint32_t)cfg->seed);
+
+  double t0 = omp_get_wtime();
+  double t_pulse = 0, t_rf_stages = 0, t_downconv = 0, t_bb_stages = 0;
+
+  /* Step 1: Pulse-shape symbols at the RF rate (RRC) — SoA */
+  shape_symbols_rrc_to_env_soa(tx_symbols, nsym, sps, cfg->rolloff, env_re, env_im);
+
+  /* Map the shaped waveform onto the physical input power level (SoA) */
+  {
+    const double local_noise_w = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
+    const double tx_signal_w = local_noise_w * db_to_lin(cfg->input_snr_db);
+    const double tx_target_mean_square_v = tx_signal_w * R_LOAD_OHM;
+    const double tx_current_mean_square_v = mean_power_soa(env_re, env_im, nrf);
+
+    if (tx_current_mean_square_v > 0.0 && tx_target_mean_square_v > 0.0) {
+      scale_soa(env_re, env_im, nrf,
+                sqrt(tx_target_mean_square_v / tx_current_mean_square_v));
+    }
+  }
+
+  /* Step 2: Add antenna noise to envelope — SoA */
+  {
+    double *env_noisy_re = ALLOC_ALIGNED_D(nrf);
+    double *env_noisy_im = ALLOC_ALIGNED_D(nrf);
+    if (!env_noisy_re || !env_noisy_im) {
+      goto cleanup;
+    }
+    memcpy(env_noisy_re, env_re, nrf * sizeof(double));
+    memcpy(env_noisy_im, env_im, nrf * sizeof(double));
+
+    {
+      const double P_noise_v2 =
+          K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ * R_LOAD_OHM;
+      add_awgn_soa(env_noisy_re, env_noisy_im, nrf, P_noise_v2);
+    }
+
+    /* Step 4: Apply TX LO phase noise before upconversion */
+    {
+      for (i = 0; i < nrf; i++) {
+        double pn = phase_noise_generate(&tx_lo_pn);
+        double cos_pn = cos(pn);
+        double sin_pn = sin(pn);
+        double tmp_re = env_noisy_re[i] * cos_pn - env_noisy_im[i] * sin_pn;
+        double tmp_im = env_noisy_re[i] * sin_pn + env_noisy_im[i] * cos_pn;
+        env_noisy_re[i] = tmp_re;
+        env_noisy_im[i] = tmp_im;
+
+        tmp_re = env_re[i] * cos_pn - env_im[i] * sin_pn;
+        tmp_im = env_re[i] * sin_pn + env_im[i] * cos_pn;
+        env_re[i] = tmp_re;
+        env_im[i] = tmp_im;
+      }
+    }
+
+    /* Step 5: IQ-modulate both clean and noisy envelopes — SoA */
+    env_to_rf_soa(env_re, env_im, nrf, fs_hz, cfg->carrier_hz, rf_ref);
+    env_to_rf_soa(env_noisy_re, env_noisy_im, nrf, fs_hz, cfg->carrier_hz, rf_sig);
+    free(env_noisy_re);
+    free(env_noisy_im);
+  }
+
+  /* Step 6: Record the INPUT RF trace metric */
+  {
+    metrics[m] =
+        compute_metric_real("input_rf_realistic", "rf_real", rf_ref, rf_sig, nrf);
+    metrics[m].signal_power = P_sig_in_W;
+    if (N_current > 0.0) {
+      metrics[m].snr_db = lin_to_db(P_sig_in_W / N_current);
+    }
+    write_trace_stage_artifacts(csv_dir, trace_dir, "traces", 0u, 1,
+                                "input_rf_realistic", &metrics[m], "RF", rf_ref, rf_sig,
+                                nrf, 24000u, fs_hz, cfg->carrier_hz);
+
+    {
+      const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
+      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
+      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
+
+      pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
+      size_t temp_ref_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_ref_sym);
+      pack_complex(temp_bb_sig_re, temp_bb_sig_im, nbb, temp_complex_buf);
+      size_t temp_sig_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_sig_sym);
+      size_t temp_eval_n =
+          (temp_ref_n < temp_sig_n) ? temp_ref_n : temp_sig_n;
+
+      StageMetric temp_metric = compute_metric_complex(
+          "input_rf_realistic", "rf_to_bb", temp_ref_sym, temp_sig_sym, temp_eval_n);
+      metrics[m].evm_pct = temp_metric.evm_pct;
+
+      write_constellation_stage_artifacts(
+          csv_dir, const_dir, "constellations", 0u, 1, "input_rf_realistic", &metrics[m],
+          "RF", constellation_template, constellation_count, tx_symbols,
+          temp_sig_sym, temp_eval_n);
+    }
+
+    ++m;
+  }
+
+  t_pulse = omp_get_wtime();
+
+  /* Step 7: Process through RF frontend stages with AM-to-PM */
+  for (i = 0u; i < rf_stage_count; ++i) {
+    StageModel stage = rf_stages[i];
+
+    metrics[m] =
+        apply_stage_real_fused(&stage, rf_ref, rf_sig, nrf, "rf_real", N_t0_W, fs_hz,
+                         cfg->carrier_hz, &N_current, &Gain_total, P_sig_in_W);
+    metrics[m].signal_power = P_sig_in_W * Gain_total;
+    write_trace_stage_artifacts(csv_dir, trace_dir, "traces", i + 1u, 0,
+                                stage.name, &metrics[m], "RF", rf_ref, rf_sig,
+                                nrf, 6000u, fs_hz, cfg->carrier_hz);
+
+    {
+      const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
+      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
+      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                   dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
+
+      pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
+      size_t temp_ref_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_ref_sym);
+      pack_complex(temp_bb_sig_re, temp_bb_sig_im, nbb, temp_complex_buf);
+      size_t temp_sig_n =
+          synchronize_and_downsample(temp_complex_buf, nbb, nsym, bb_sps,
+                                     cfg->rolloff, tx_symbols, temp_sig_sym);
+      size_t temp_eval_n =
+          (temp_ref_n < temp_sig_n) ? temp_ref_n : temp_sig_n;
+
+      StageMetric temp_metric = compute_metric_complex(
+          stage.name, "rf_to_bb", tx_symbols, temp_sig_sym, temp_eval_n);
+      metrics[m].evm_pct = temp_metric.evm_pct;
+
+      write_constellation_stage_artifacts(
+          csv_dir, const_dir, "constellations", i + 1u, 0, stage.name, &metrics[m],
+          "RF", constellation_template, constellation_count, tx_symbols,
+          temp_sig_sym, temp_eval_n);
+    }
+
+    ++m;
+  }
+
+  t_rf_stages = omp_get_wtime();
+
+  /* Step 8: Downconvert RF → complex baseband — SoA */
+  {
+    const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
+    mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                 dec_factor, bb_ref_re, bb_ref_im, i_raw, q_raw);
+    mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+                 dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
+  }
+
+  /* Step 9: Apply RX LO phase noise as complex rotation on baseband */
+  {
+    for (i = 0; i < nbb; i++) {
+      double pn = phase_noise_generate(&rx_lo_pn);
+      double c = cos(pn), s = sin(pn);
+      double new_re = bb_sig_re[i] * c - bb_sig_im[i] * s;
+      double new_im = bb_sig_re[i] * s + bb_sig_im[i] * c;
+      bb_sig_re[i] = new_re;
+      bb_sig_im[i] = new_im;
+
+      /* Apply SAME rotation to reference */
+      new_re = bb_ref_re[i] * c - bb_ref_im[i] * s;
+      new_im = bb_ref_re[i] * s + bb_ref_im[i] * c;
+      bb_ref_re[i] = new_re;
+      bb_ref_im[i] = new_im;
+    }
+  }
+
+  t_downconv = omp_get_wtime();
+
+  /* Step 10: Apply I/Q imbalance after downconversion */
+  {
+    for (i = 0; i < nbb; i++) {
+      iq_imbalance_apply_real(&bb_sig_re[i], &bb_sig_im[i], &iq_cfg);
+      /* Reference passes through clean */
+    }
+  }
+
+  /* Step 11: Extract symbol-rate samples */
+  {
+    pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
+    size_t ref_eval_n = synchronize_and_downsample(
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    size_t sig_eval_n = synchronize_and_downsample(
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
+    size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
+    (void)eval_n;
+
+    metrics[m] = compute_metric_complex("MIX2_Downconv_realistic", "rf_to_bb", ref_sym,
+                                        sig_sym, ref_eval_n);
+    metrics[m].signal_power = P_sig_in_W * Gain_total;
+    if (N_current > 0.0) {
+      metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
+    }
+    write_constellation_stage_artifacts(
+        csv_dir, const_dir, "constellations", rf_stage_count + 1u, 0,
+        metrics[m].stage, &metrics[m], "RF", constellation_template,
+        constellation_count, tx_symbols, sig_sym, sig_eval_n);
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    write_complex_trace_stage_artifacts(
+        trace_dir, "traces", rf_stage_count + 1u, 0, metrics[m].stage,
+        &metrics[m], temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+    ++m;
+  }
+
+  /* Step 12: Process through post-mixer BB stages with biquad filters and flicker noise */
+  for (i = 0u; i < bb_stage_count; ++i) {
+    StageModel stage = bb_stages[i];
+
+    if (strstr(stage.name, "LNA 3") || strstr(stage.name, "lna3") ||
+        strstr(stage.name, "post_05")) {
+      double p_mean = mean_power_soa(bb_sig_re, bb_sig_im, nbb);
+      double v_rms = sqrt(p_mean);
+      double v_pp_est = v_rms * 2.0 * sqrt(2.0);
+      double target_vpp = 1.0;
+      if (v_pp_est > 1e-9) {
+        double g_extra_db = 20.0 * log10(target_vpp / v_pp_est);
+        if (g_extra_db < -20.0) g_extra_db = -20.0;
+        if (g_extra_db > 20.0) g_extra_db = 20.0;
+        stage.gain_db += g_extra_db;
+      }
+    }
+
+    /* Apply biquad filter if filter_type == 1 (Butterworth) */
+    if (stage.filter_type == 1) {
+      BiquadState local_bq;
+      BiquadConfig bq_cfg = {0};
+      bq_cfg.cutoff_hz = 5.0 * cfg->symbol_rate_hz;
+      bq_cfg.fs_hz = fs_hz / (double)dec_factor;
+      bq_cfg.order = stage.filter_order > 0 ? stage.filter_order : 4;
+      if (biquad_init(&local_bq, &bq_cfg) == 0) {
+        biquad_process_soa(&local_bq, bb_sig_re, bb_sig_im, bb_sig_re, bb_sig_im, nbb);
+        biquad_process_soa(&local_bq, bb_ref_re, bb_ref_im, bb_ref_re, bb_ref_im, nbb);
+      }
+    } else {
+      /* Legacy path: use apply_stage_soa */
+      apply_stage_soa(&stage, bb_ref_re, bb_ref_im, bb_sig_re, bb_sig_im, nbb,
+                      "rf_to_bb", N_t0_W, &N_current, &Gain_total, P_sig_in_W);
+    }
+
+    /* Add flicker noise to signal path */
+    {
+      size_t j;
+      for (j = 0; j < nbb; j++) {
+        double fn = flicker_noise_generate(&flicker_cfg);
+        bb_sig_re[j] += fn;
+        fn = flicker_noise_generate(&flicker_cfg);
+        bb_sig_im[j] += fn;
+      }
+    }
+
+    pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
+    size_t ref_eval_n = synchronize_and_downsample(
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    size_t sig_eval_n = synchronize_and_downsample(
+        temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
+    size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
+
+    metrics[m] = compute_metric_complex(stage.name, "rf_to_bb", ref_sym,
+                                        sig_sym, eval_n);
+    metrics[m].signal_power = P_sig_in_W * Gain_total;
+    metrics[m].gain_db = stage.gain_db;
+    metrics[m].nf_db = stage.nf_db;
+    metrics[m].filter_len = stage.filter_len;
+    metrics[m].is_limiter = stage.is_limiter;
+    if (N_current > 0.0) {
+      metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
+    }
+
+    write_constellation_stage_artifacts(
+        csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, stage.name,
+        &metrics[m], "RF", constellation_template, constellation_count,
+        tx_symbols, sig_sym, eval_n);
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    write_complex_trace_stage_artifacts(
+        trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+    ++m;
+  }
+
+  /* Step 13: Apply ADC model at final stage */
+  {
+    double f_in_hz = cfg->symbol_rate_hz;
+    size_t j;
+    for (j = 0; j < nsym; j++) {
+      adc_model_apply(&sig_sym[j].re, f_in_hz, &adc_cfg);
+      adc_model_apply(&sig_sym[j].im, f_in_hz, &adc_cfg);
+    }
+  }
+
+  /* Step 14: Add LO leakage DC offset */
+  {
+    double dc_offset = 0.001; /* 1 mV typical LO leakage */
+    size_t j;
+    for (j = 0; j < nsym; j++) {
+      sig_sym[j].re += dc_offset;
+      sig_sym[j].im += dc_offset;
+    }
+  }
+
+  /* Step 15: Report results */
+  *final_vpp = complex_real_vpp(ref_sym, nsym);
+  *metric_count = m;
+  *used_sps = sps;
+  *used_fs_hz = fs_hz;
+
+  t_bb_stages = omp_get_wtime();
+
+  double total = t_bb_stages - t0;
+  fprintf(stderr, "\n=== TIMING Realistic RF (16 threads) ===\n");
+  fprintf(stderr, "Pulse shaping + upconv + input metric: %.2fs (%.1f%%)\n", t_pulse - t0, (t_pulse - t0) / total * 100);
+  fprintf(stderr, "RF stages (%zu): %.2fs (%.1f%%)\n", (size_t)rf_stage_count, t_rf_stages - t_pulse, (t_rf_stages - t_pulse) / total * 100);
+  fprintf(stderr, "Downconversion: %.2fs (%.1f%%)\n", t_downconv - t_rf_stages, (t_downconv - t_rf_stages) / total * 100);
+  fprintf(stderr, "BB stages (%zu): %.2fs (%.1f%%)\n", (size_t)bb_stage_count, t_bb_stages - t_downconv, (t_bb_stages - t_downconv) / total * 100);
+  fprintf(stderr, "Total: %.2fs\n", total);
+
+cleanup:
   /* Clean up all working buffers */
-  free(env);
-  free(rf_ref);
-  free(rf_sig);
-  free(bb_ref_stream);
-  free(bb_sig_stream);
-  free(ref_sym);
-  free(sig_sym);
+  free(env_re); free(env_im);
+  free(rf_ref); free(rf_sig);
+  free(bb_ref_re); free(bb_ref_im);
+  free(bb_sig_re); free(bb_sig_im);
+  free(ref_sym); free(sig_sym);
+  free(temp_bb_ref_re); free(temp_bb_ref_im);
+  free(temp_bb_sig_re); free(temp_bb_sig_im);
+  free(temp_ref_sym); free(temp_sig_sym);
+  free(temp_complex_buf);
+  free(i_raw); free(q_raw);
+
+  /* Free impairment module resources */
+  phase_noise_free(&tx_lo_pn);
+  phase_noise_free(&rx_lo_pn);
+  flicker_noise_free(&flicker_cfg);
+  adc_model_free(&adc_cfg);
+
   return 0;
 }
 
@@ -2615,6 +3366,9 @@ static void print_usage(const char *exe) {
   printf("  --topology-sim <1..4> Output simulation slot under "
          "out/topology_sim_N (default: 1)\n");
   printf("  --stage-sim <1..4>    Alias for --topology-sim\n");
+  printf("  --disable-bb          Enable complex baseband path (default: disabled)\n");
+  printf("  --enable-rf           Enable RF baseline path (default: enabled)\n");
+  printf("  --enable-realistic    Enable realistic impairment path (default: enabled)\n");
 }
 
 /* ============================================================================
@@ -2651,6 +3405,7 @@ static void print_usage(const char *exe) {
  *   6 = Complex-baseband simulation error
  *   7 = Brute-force RF simulation error
  *   8 = Output directory creation error
+ *   9 = Realistic RF simulation error
  */
 int main(int argc, char **argv) {
   SimConfig cfg;               /* Top-level simulation parameters */
@@ -2665,12 +3420,17 @@ int main(int argc, char **argv) {
   unsigned short *labels; /* Transmitted symbol indices (for potential SER) */
   StageMetric metrics_bb[MAX_METRICS]; /* Baseband path metrics */
   StageMetric metrics_rf[MAX_METRICS]; /* RF path metrics */
+  StageMetric metrics_realistic[MAX_METRICS]; /* Realistic path metrics */
   size_t count_bb = 0u;                /* Number of baseband metrics */
   size_t count_rf = 0u;                /* Number of RF metrics */
+  size_t count_realistic = 0u;         /* Number of realistic metrics */
   double final_vpp_bb = 0.0;           /* Final Vpp after baseband path */
   double final_vpp_rf = 0.0;           /* Final Vpp after RF path */
+  double final_vpp_realistic = 0.0;    /* Final Vpp after realistic path */
   int rf_sps = 0;                      /* RF samples per symbol (output) */
+  int realistic_sps = 0;               /* Realistic samples per symbol (output) */
   double rf_fs_used = 0.0;             /* RF sampling frequency used (output) */
+  double realistic_fs_used = 0.0;      /* Realistic sampling frequency used (output) */
   int i;                               /* Loop variable for CLI parsing */
 
   /* Link budget variables */
@@ -2683,7 +3443,7 @@ int main(int argc, char **argv) {
   /* --- Set default simulation parameters --- */
   cfg.carrier_hz = 24.0e9;     /* 24 GHz carrier (K-band satellite) */
   cfg.symbol_rate_hz = 10.0e6; /* 10 MegaSymbols/sec */
-  cfg.symbols = 3000;           /* 3000 symbols - reasonable run time */
+  cfg.symbols = 3000;          /* 3000 symbols - reasonable run time */
   cfg.rolloff = 0.0;           /* Rectangular pulses (fastest) */
   cfg.input_snr_db = 20.0;     /* 20 dB input SNR based on assignment */
   cfg.antenna_temp_k =
@@ -2691,9 +3451,19 @@ int main(int argc, char **argv) {
   cfg.t0_k = 290.0; /* 290 K reference temperature (room temp) */
   cfg.rf_sample_rate_hz = 96.0e9;      /* 96 GHz RF sampling */
   cfg.seed = (unsigned int)time(NULL); /* Default seed: current time */
+  cfg.run_bb = 0;                      /* Baseband path disabled by default */
+  cfg.run_rf = 1;                      /* RF baseline path enabled by default */
+  cfg.run_realistic = 1;               /* Realistic path enabled by default */
   topology_sim_id = 1;                 /* Default output slot: topology_sim_1 */
   memset(&stage_cfg, 0, sizeof(stage_cfg));
   stage_err[0] = '\0';
+
+  RealisticPathConfig realistic_cfg;
+  realistic_cfg.enable_lo_phase_noise = 1;
+  realistic_cfg.enable_iq_gain_error = 1;
+  realistic_cfg.enable_iq_phase_error = 1;
+  realistic_cfg.enable_am_pm = 1;
+  realistic_cfg.enable_butterworth = 1;
 
   /* --- Parse command-line arguments --- */
   for (i = 1; i < argc; ++i) {
@@ -2746,6 +3516,12 @@ int main(int argc, char **argv) {
                 TOPOLOGY_SIM_COUNT);
         return 2;
       }
+    } else if (strcmp(argv[i], "--disable-bb") == 0) {
+      cfg.run_bb = 0;
+    } else if (strcmp(argv[i], "--enable-rf") == 0) {
+      cfg.run_rf = 1;
+    } else if (strcmp(argv[i], "--enable-realistic") == 0) {
+      cfg.run_realistic = 1;
     } else {
       print_usage(argv[0]);
       return 1;
@@ -2770,26 +3546,48 @@ int main(int argc, char **argv) {
   }
 
   /* --- Build output directory paths --- */
-  char baseband_dir[256];
-  char rf_dir[256];
+  char csv_dir[256];
+  char const_dir[256];
+  char trace_dir[256];
   char rf_metrics_csv_path[256];
-  if (snprintf(baseband_dir, sizeof(baseband_dir),
-               OUTPUT_ROOT_DIR "/baseband") >= (int)sizeof(baseband_dir) ||
-      snprintf(rf_dir, sizeof(rf_dir), OUTPUT_ROOT_DIR "/rf") >=
-          (int)sizeof(rf_dir)) {
+  char rf_csv_dir[256];
+  char rf_const_dir[256];
+  char rf_trace_dir[256];
+  char realistic_csv_dir[256];
+  char realistic_const_dir[256];
+  char realistic_trace_dir[256];
+  if (snprintf(csv_dir, sizeof(csv_dir),
+               OUTPUT_ROOT_DIR "/csv") >= (int)sizeof(csv_dir) ||
+      snprintf(const_dir, sizeof(const_dir), OUTPUT_ROOT_DIR "/constellations") >=
+          (int)sizeof(const_dir) ||
+      snprintf(trace_dir, sizeof(trace_dir), OUTPUT_ROOT_DIR "/traces") >=
+          (int)sizeof(trace_dir) ||
+      snprintf(rf_csv_dir, sizeof(rf_csv_dir), OUTPUT_ROOT_DIR "/rf_baseline/csv") >= (int)sizeof(rf_csv_dir) ||
+      snprintf(rf_const_dir, sizeof(rf_const_dir), OUTPUT_ROOT_DIR "/rf_baseline/constellations") >= (int)sizeof(rf_const_dir) ||
+      snprintf(rf_trace_dir, sizeof(rf_trace_dir), OUTPUT_ROOT_DIR "/rf_baseline/traces") >= (int)sizeof(rf_trace_dir) ||
+      snprintf(realistic_csv_dir, sizeof(realistic_csv_dir), OUTPUT_ROOT_DIR "/realistic/csv") >= (int)sizeof(realistic_csv_dir) ||
+      snprintf(realistic_const_dir, sizeof(realistic_const_dir), OUTPUT_ROOT_DIR "/realistic/constellations") >= (int)sizeof(realistic_const_dir) ||
+      snprintf(realistic_trace_dir, sizeof(realistic_trace_dir), OUTPUT_ROOT_DIR "/realistic/traces") >= (int)sizeof(realistic_trace_dir)) {
     fprintf(stderr, "Failed to build output subdirectories\n");
     return 5;
   }
   if (snprintf(rf_metrics_csv_path, sizeof(rf_metrics_csv_path),
                "%s/rf_metrics.csv",
-               rf_dir) >= (int)sizeof(rf_metrics_csv_path)) {
+               csv_dir) >= (int)sizeof(rf_metrics_csv_path)) {
     fprintf(stderr, "Failed to build aggregate RF metrics CSV path\n");
     return 5;
   }
 
   /* Clear old output files from the selected slot */
-  if (clear_directory_contents(baseband_dir) != 0 ||
-      clear_directory_contents(rf_dir) != 0) {
+  if (clear_directory_contents(csv_dir) != 0 ||
+      clear_directory_contents(const_dir) != 0 ||
+      clear_directory_contents(trace_dir) != 0 ||
+      clear_directory_contents(rf_csv_dir) != 0 ||
+      clear_directory_contents(rf_const_dir) != 0 ||
+      clear_directory_contents(rf_trace_dir) != 0 ||
+      clear_directory_contents(realistic_csv_dir) != 0 ||
+      clear_directory_contents(realistic_const_dir) != 0 ||
+      clear_directory_contents(realistic_trace_dir) != 0) {
     fprintf(
         stderr,
         "Failed to clear output directories before writing new artifacts\n");
@@ -2846,28 +3644,88 @@ int main(int argc, char **argv) {
     return 5;
   }
 
-  /* Baseband path disabled for fast RF-only testing. */
-  (void)baseband_dir;
-  (void)metrics_bb;
-  (void)count_bb;
-  (void)final_vpp_bb;
-
-  /* --- Run Simulation 2: Brute-Force RF --- */
-  if (simulate_bruteforce_rf(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
-                             (size_t)cfg.symbols, metrics_rf, &count_rf,
-                             &final_vpp_rf, &rf_sps, &rf_fs_used, rf_dir,
-                             rf_dir) != 0) {
-    fprintf(stderr, "Brute-force RF simulation failed\n");
-    stage_models_free(&stage_cfg);
-    free(tx_symbols);
-    free(labels);
-    return 7;
+  /* --- Run Simulation Paths --- */
+  if (cfg.run_bb) {
+    if (simulate_complex_baseband(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
+                                  (size_t)cfg.symbols, metrics_bb, &count_bb,
+                                  &final_vpp_bb, csv_dir, const_dir, trace_dir) != 0) {
+      fprintf(stderr, "Complex-baseband simulation failed\n");
+      stage_models_free(&stage_cfg);
+      free(tx_symbols);
+      free(labels);
+      return 6;
+    }
+  } else {
+    (void)csv_dir;
+    (void)const_dir;
+    (void)trace_dir;
+    (void)metrics_bb;
+    (void)count_bb;
+    (void)final_vpp_bb;
   }
 
-  if (count_rf > 0u &&
-      write_metrics_csv(rf_metrics_csv_path, metrics_rf, count_rf) != 0) {
-    fprintf(stderr, "Warning: failed to write aggregate RF metrics CSV '%s'\n",
-            rf_metrics_csv_path);
+  if (cfg.run_rf) {
+    if (simulate_bruteforce_rf(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
+                               (size_t)cfg.symbols, metrics_rf, &count_rf,
+                               &final_vpp_rf, &rf_sps, &rf_fs_used, rf_csv_dir,
+                               rf_const_dir, rf_trace_dir) != 0) {
+      fprintf(stderr, "Brute-force RF simulation failed\n");
+      stage_models_free(&stage_cfg);
+      free(tx_symbols);
+      free(labels);
+      return 7;
+    }
+
+    {
+      char rf_metrics_path[256];
+      snprintf(rf_metrics_path, sizeof(rf_metrics_path), "%s/rf_metrics.csv", rf_csv_dir);
+      if (count_rf > 0u &&
+          write_metrics_csv(rf_metrics_path, metrics_rf, count_rf) != 0) {
+        fprintf(stderr, "Warning: failed to write aggregate RF metrics CSV '%s'\n",
+                rf_metrics_path);
+      }
+    }
+  } else {
+    (void)metrics_rf;
+    (void)count_rf;
+    (void)final_vpp_rf;
+    (void)rf_sps;
+    (void)rf_fs_used;
+    (void)rf_csv_dir;
+    (void)rf_const_dir;
+    (void)rf_trace_dir;
+  }
+
+  if (cfg.run_realistic) {
+    if (simulate_realistic_rf(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
+                              (size_t)cfg.symbols, metrics_realistic, &count_realistic,
+                              &final_vpp_realistic, &realistic_sps, &realistic_fs_used,
+                              realistic_csv_dir, realistic_const_dir, realistic_trace_dir) != 0) {
+      fprintf(stderr, "Realistic RF simulation failed\n");
+      stage_models_free(&stage_cfg);
+      free(tx_symbols);
+      free(labels);
+      return 9;
+    }
+
+    {
+      char realistic_metrics_path[256];
+      snprintf(realistic_metrics_path, sizeof(realistic_metrics_path), "%s/realistic_metrics.csv", realistic_csv_dir);
+      if (count_realistic > 0u &&
+          write_metrics_csv(realistic_metrics_path, metrics_realistic, count_realistic) != 0) {
+        fprintf(stderr, "Warning: failed to write aggregate realistic metrics CSV '%s'\n",
+                realistic_metrics_path);
+      }
+    }
+  } else {
+    (void)metrics_realistic;
+    (void)count_realistic;
+    (void)final_vpp_realistic;
+    (void)realistic_sps;
+    (void)realistic_fs_used;
+    (void)realistic_csv_dir;
+    (void)realistic_const_dir;
+    (void)realistic_trace_dir;
   }
 
   /* --- Print console summary --- */
@@ -2875,9 +3733,47 @@ int main(int argc, char **argv) {
   printf("Stage CSV: %s\n", resolved_stage_csv_path);
   printf("Input budget: Noise=%.4f dBm, Signal=%.4f dBm (SNR=%.2f dB)\n",
          noise_dbm, signal_dbm, cfg.input_snr_db);
+  printf("Paths: baseband=%s, rf_baseline=%s, realistic=%s\n",
+         cfg.run_bb ? "ON" : "OFF",
+         cfg.run_rf ? "ON" : "OFF",
+         cfg.run_realistic ? "ON" : "OFF");
 
-  print_metrics("RF Brute-Force Stages Metrics (SNR/EVM after each stage)",
-                metrics_rf, count_rf);
+  if (cfg.run_bb && count_bb > 0) {
+    print_metrics("Complex Baseband Stages Metrics", metrics_bb, count_bb);
+  }
+  if (cfg.run_rf && count_rf > 0) {
+    print_metrics("RF Brute-Force Stages Metrics (SNR/EVM after each stage)",
+                  metrics_rf, count_rf);
+  }
+  if (cfg.run_realistic && count_realistic > 0) {
+    print_metrics("Realistic RF Stages Metrics (with impairments)",
+                  metrics_realistic, count_realistic);
+  }
+
+  if (cfg.run_rf && cfg.run_realistic && count_rf > 0 && count_realistic > 0) {
+    printf("\n=== RF Baseline vs Realistic Path Comparison ===\n");
+    printf("%-20s %12s %12s %12s %12s\n", "Stage", "RF SNR(dB)", "RF EVM(%)", "Real SNR(dB)", "Real EVM(%)");
+    printf("%-20s %12s %12s %12s %12s\n", "--------------------", "------------", "------------", "------------", "------------");
+    {
+      size_t ri = 0, si = 0;
+      while (ri < count_rf || si < count_realistic) {
+        const char *stage_name = NULL;
+        if (ri < count_rf) stage_name = metrics_rf[ri].stage;
+        if (si < count_realistic && (stage_name == NULL || strcmp(stage_name, metrics_realistic[si].stage) > 0))
+          stage_name = metrics_realistic[si].stage;
+
+        double rf_snr = ri < count_rf && strcmp(metrics_rf[ri].stage, stage_name) == 0 ? metrics_rf[ri].snr_db : 0.0;
+        double rf_evm = ri < count_rf && strcmp(metrics_rf[ri].stage, stage_name) == 0 ? metrics_rf[ri].evm_pct : 0.0;
+        double rl_snr = si < count_realistic && strcmp(metrics_realistic[si].stage, stage_name) == 0 ? metrics_realistic[si].snr_db : 0.0;
+        double rl_evm = si < count_realistic && strcmp(metrics_realistic[si].stage, stage_name) == 0 ? metrics_realistic[si].evm_pct : 0.0;
+
+        printf("%-20s %12.2f %12.2f %12.2f %12.2f\n", stage_name, rf_snr, rf_evm, rl_snr, rl_evm);
+
+        if (ri < count_rf && strcmp(metrics_rf[ri].stage, stage_name) == 0) ri++;
+        if (si < count_realistic && strcmp(metrics_realistic[si].stage, stage_name) == 0) si++;
+      }
+    }
+  }
 
   printf("\nOutputs written under ./out/\n");
   printf("Generated files strictly follow the assignment requirements (Trace, "

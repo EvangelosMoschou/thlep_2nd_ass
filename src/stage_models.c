@@ -566,6 +566,12 @@ static int set_stage(
     int is_limiter,
     double p1db_dbm,
     double ip3_dbm,
+    double lo_phase_noise_dbc_hz,
+    double iq_gain_error_db,
+    double iq_phase_error_deg,
+    double am_pm_coeff,
+    int filter_type,
+    int filter_order,
     char* errbuf,
     size_t errbuf_size) {
 
@@ -593,6 +599,12 @@ static int set_stage(
             chain[i].is_limiter = is_limiter ? 1 : 0;
             chain[i].p1db_dbm = p1db_dbm;
             chain[i].ip3_dbm = ip3_dbm;
+            chain[i].lo_phase_noise_dbc_hz = lo_phase_noise_dbc_hz;
+            chain[i].iq_gain_error_db = iq_gain_error_db;
+            chain[i].iq_phase_error_deg = iq_phase_error_deg;
+            chain[i].am_pm_coeff = am_pm_coeff;
+            chain[i].filter_type = filter_type;
+            chain[i].filter_order = filter_order;
             return 0;
         }
     }
@@ -619,6 +631,12 @@ static int set_stage(
         cfg->chains[id][count].is_limiter = is_limiter ? 1 : 0;
         cfg->chains[id][count].p1db_dbm = p1db_dbm;
         cfg->chains[id][count].ip3_dbm = ip3_dbm;
+        cfg->chains[id][count].lo_phase_noise_dbc_hz = lo_phase_noise_dbc_hz;
+        cfg->chains[id][count].iq_gain_error_db = iq_gain_error_db;
+        cfg->chains[id][count].iq_phase_error_deg = iq_phase_error_deg;
+        cfg->chains[id][count].am_pm_coeff = am_pm_coeff;
+        cfg->chains[id][count].filter_type = filter_type;
+        cfg->chains[id][count].filter_order = filter_order;
     }
 
     return 0;
@@ -752,35 +770,35 @@ static int map_legacy_component(
 
     /* --- "Filter 1" → RF Band-Pass Filter --- */
     if (strcmp(key, "filter1") == 0) {
-        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "rf_bpf_eq", gain_db, nf_db, 3, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "rf_bpf_eq", gain_db, nf_db, 3, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
         if (rc != 0) return rc;
-        return set_stage(cfg, STAGE_CHAIN_RF_FRONTEND, "rf_bpf", gain_db, nf_db, 5, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        return set_stage(cfg, STAGE_CHAIN_RF_FRONTEND, "rf_bpf", gain_db, nf_db, 5, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
     }
 
     /* --- "LNA 1" → Low-Noise Amplifier --- */
     if (strcmp(key, "lna1") == 0) {
-        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "lna", gain_db, nf_db, 1, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "lna", gain_db, nf_db, 1, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
         if (rc != 0) return rc;
-        return set_stage(cfg, STAGE_CHAIN_RF_FRONTEND, "lna", gain_db, nf_db, 1, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        return set_stage(cfg, STAGE_CHAIN_RF_FRONTEND, "lna", gain_db, nf_db, 1, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
     }
 
     /* --- "Mixer 1" → Mixer Downconverter (baseband chain only) --- */
     if (strcmp(key, "mixer1") == 0) {
-        return set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "mixer_downconv", gain_db, nf_db, 1, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        return set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "mixer_downconv", gain_db, nf_db, 1, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
     }
 
     /* --- "Filter 2" → Baseband Low-Pass Filter --- */
     if (strcmp(key, "filter2") == 0) {
-        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "bb_lpf", gain_db, nf_db, 5, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "bb_lpf", gain_db, nf_db, 5, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
         if (rc != 0) return rc;
-        return set_stage(cfg, STAGE_CHAIN_RF_POSTMIX_BB, "bb_lpf", gain_db, nf_db, 5, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        return set_stage(cfg, STAGE_CHAIN_RF_POSTMIX_BB, "bb_lpf", gain_db, nf_db, 5, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
     }
 
     /* --- "LNA 2" or "LNA 3" → Baseband Amplifier (no auto-gain, no limiter) --- */
     if (strcmp(key, "lna2") == 0 || strcmp(key, "lna3") == 0) {
-        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "bb_amp_1vpp", gain_db, nf_db, 1, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        rc = set_stage(cfg, STAGE_CHAIN_BASEBAND_RX, "bb_amp_1vpp", gain_db, nf_db, 1, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
         if (rc != 0) return rc;
-        return set_stage(cfg, STAGE_CHAIN_RF_POSTMIX_BB, "bb_amp_1vpp", gain_db, nf_db, 1, 0, INFINITY, INFINITY, errbuf, errbuf_size);
+        return set_stage(cfg, STAGE_CHAIN_RF_POSTMIX_BB, "bb_amp_1vpp", gain_db, nf_db, 1, 0, INFINITY, INFINITY, 0.0, 0.0, 0.0, 0.0, 0, 0, errbuf, errbuf_size);
     }
 
     /*
@@ -864,6 +882,12 @@ int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char
     int idx_ip3 = -1;
     int idx_ref = -1;
     int idx_enabled = -1;
+    int idx_lo_pn = -1;
+    int idx_iq_gain = -1;
+    int idx_iq_phase = -1;
+    int idx_am_pm = -1;
+    int idx_filter_type = -1;
+    int idx_filter_order = -1;
 
     StageModelsConfig cfg;            /* Temporary config — only assigned to out_cfg on success */
 
@@ -942,6 +966,18 @@ int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char
                     idx_ref = (int)i;
                 } else if (strcmp(norm, "enabled") == 0) {
                     idx_enabled = (int)i;
+                } else if (strcmp(norm, "lopn") == 0 || strcmp(norm, "lophasedbc") == 0 || strcmp(norm, "lopn_dbc_hz") == 0) {
+                    idx_lo_pn = (int)i;
+                } else if (strcmp(norm, "iqgainerr") == 0 || strcmp(norm, "iqgainerrdb") == 0 || strcmp(norm, "iq_gain_err_db") == 0) {
+                    idx_iq_gain = (int)i;
+                } else if (strcmp(norm, "iqphaseerr") == 0 || strcmp(norm, "iqphaseerrdeg") == 0 || strcmp(norm, "iq_phase_err_deg") == 0) {
+                    idx_iq_phase = (int)i;
+                } else if (strcmp(norm, "ampm") == 0 || strcmp(norm, "ampmdegperdb") == 0 || strcmp(norm, "am_pm_deg_per_db") == 0) {
+                    idx_am_pm = (int)i;
+                } else if (strcmp(norm, "filtertype") == 0 || strcmp(norm, "filter_type") == 0) {
+                    idx_filter_type = (int)i;
+                } else if (strcmp(norm, "filterorder") == 0 || strcmp(norm, "filter_order") == 0) {
+                    idx_filter_order = (int)i;
                 }
             }
 
@@ -997,7 +1033,7 @@ int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char
                 return -4;
             }
         } else {
-            /* CANONICAL FORMAT: chain, name, gain_db, nf_db, [filter_len], [is_limiter], [p1db_dbm], [ip3_dbm], [ref], [enabled] */
+            /* CANONICAL FORMAT: chain, name, gain_db, nf_db, [filter_len], [is_limiter], [p1db_dbm], [ip3_dbm], [ref], [enabled], [lo_pn_dbc_hz], [iq_gain_err_db], [iq_phase_err_deg], [am_pm_deg_per_db], [filter_type], [filter_order] */
             StageChainId chain_id;
             double gain_db;
             double nf_db;
@@ -1006,6 +1042,12 @@ int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char
             double p1db_spec = INFINITY;
             double ip3_spec = INFINITY;
             int is_ref_out = 0;
+            double lo_phase_noise_dbc_hz = 0.0;
+            double iq_gain_error_db = 0.0;
+            double iq_phase_error_deg = 0.0;
+            double am_pm_coeff = 0.0;
+            int filter_type = 0;
+            int filter_order = 0;
 
             /* Ensure all required columns are present in this row */
             if (idx_name >= (int)count || idx_gain >= (int)count || idx_nf >= (int)count) {
@@ -1057,6 +1099,24 @@ int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char
                 normalize_token(fields[idx_ref], norm, sizeof(norm));
                 if (strcmp(norm, "out") == 0) is_ref_out = 1;
             }
+            if (idx_lo_pn >= 0 && idx_lo_pn < (int)count) {
+                if (fields[idx_lo_pn][0] != '\0') parse_double_value(fields[idx_lo_pn], &lo_phase_noise_dbc_hz);
+            }
+            if (idx_iq_gain >= 0 && idx_iq_gain < (int)count) {
+                if (fields[idx_iq_gain][0] != '\0') parse_double_value(fields[idx_iq_gain], &iq_gain_error_db);
+            }
+            if (idx_iq_phase >= 0 && idx_iq_phase < (int)count) {
+                if (fields[idx_iq_phase][0] != '\0') parse_double_value(fields[idx_iq_phase], &iq_phase_error_deg);
+            }
+            if (idx_am_pm >= 0 && idx_am_pm < (int)count) {
+                if (fields[idx_am_pm][0] != '\0') parse_double_value(fields[idx_am_pm], &am_pm_coeff);
+            }
+            if (idx_filter_type >= 0 && idx_filter_type < (int)count) {
+                (void)parse_int_value(fields[idx_filter_type], &filter_type);
+            }
+            if (idx_filter_order >= 0 && idx_filter_order < (int)count) {
+                (void)parse_int_value(fields[idx_filter_order], &filter_order);
+            }
 
             /* Apply In/Out reference logic to get input-referred values */
             if (is_ref_out) {
@@ -1065,7 +1125,7 @@ int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char
             }
 
             /* Add the stage to the appropriate chain */
-            if (set_stage(&cfg, chain_id, fields[idx_name], gain_db, nf_db, filter_len, is_limiter, p1db_spec, ip3_spec, errbuf, errbuf_size) != 0) {
+            if (set_stage(&cfg, chain_id, fields[idx_name], gain_db, nf_db, filter_len, is_limiter, p1db_spec, ip3_spec, lo_phase_noise_dbc_hz, iq_gain_error_db, iq_phase_error_deg, am_pm_coeff, filter_type, filter_order, errbuf, errbuf_size) != 0) {
                 set_error(errbuf, errbuf_size, "Failed to add stage at line %u", line_no);
                 stage_models_free(&cfg);
                 fclose(f);

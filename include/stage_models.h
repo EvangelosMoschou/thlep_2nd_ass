@@ -62,6 +62,24 @@ typedef struct StageModel {
 
     /** Input-referred 3rd-order intercept point in dBm. Inf = no IMD. */
     double ip3_dbm;
+
+    /** AM-to-PM conversion coefficient in degrees/dB. 0 = no AM-to-PM. */
+    double am_pm_coeff;
+
+    /** LO phase noise floor in dBc/Hz. 0 = no phase noise. */
+    double lo_phase_noise_dbc_hz;
+
+    /** I/Q gain mismatch in dB. 0 = perfect match. */
+    double iq_gain_error_db;
+
+    /** I/Q phase error in degrees. 0 = perfect quadrature. */
+    double iq_phase_error_deg;
+
+    /** Filter type: 0 = moving-average (legacy), 1 = Butterworth. */
+    int filter_type;
+
+    /** Butterworth filter order (2, 4, 6). 0 = use legacy filter_len. */
+    int filter_order;
 } StageModel;
 
 /** @brief Number of distinct receiver stage chains (matches the StageChainId enum count). */

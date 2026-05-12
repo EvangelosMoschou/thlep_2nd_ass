@@ -680,33 +680,6 @@ static int write_real_trace_csv(const char* path, const double* ref, const doubl
 }
 
 
-static int write_complex_trace_csv(const char* path, const Complex* sig, size_t n, size_t max_points) {
-    FILE* f;
-    size_t i;
-    size_t count = n;
-
-    if (!path || !sig || n == 0u) {
-        return -1;
-    }
-
-    if (max_points > 0u && count > max_points) {
-        count = max_points;
-    }
-
-    f = fopen(path, "w");
-    if (!f) {
-        return -2;
-    }
-
-    fprintf(f, "idx,i,q\n");
-    for (i = 0u; i < count; ++i) {
-        fprintf(f, "%zu,%.12f,%.12f\n", i, sig[i].re, sig[i].im);
-    }
-
-    fclose(f);
-    return 0;
-}
-
 
 /*
  * write_metrics_csv — Save per-stage performance metrics to a CSV file
@@ -1091,7 +1064,7 @@ static int write_constellation_svg(
  *   - Show ~TRACE_ZOOM_PERIODS_DEFAULT periods of the signal when signal_hz is provided
  *   - Fallback to fixed microsecond window only when signal_hz is unavailable
  */
-static size_t trace_zoom_window_samples(size_t total_samples, double fs_hz, size_t stage_number, int is_input, double signal_hz) {
+static size_t trace_zoom_window_samples(size_t total_samples, double fs_hz, size_t stage_number, int is_input, double signal_hz, double display_window_us) {
     const int is_high_rate_rf = (fs_hz >= 1.0e9);
     const double fallback_zoom_us = is_high_rate_rf ? 0.02 : 0.75;
     double periods_to_show = TRACE_ZOOM_PERIODS_DEFAULT;
@@ -1104,20 +1077,22 @@ static size_t trace_zoom_window_samples(size_t total_samples, double fs_hz, size
         return total_samples;
     }
 
-    if (is_high_rate_rf && !is_input && stage_number >= 1u && stage_number <= 5u) {
-        /* Increase source-sample coverage on the first RF frontend stages. */
-        periods_to_show = TRACE_ZOOM_PERIODS_EARLY_RF;
-    }
-    /* Post-mix stages (6+): tighter zoom */
-    if (!is_input && stage_number >= 6u) {
-        periods_to_show = 10.0;
-    }
-
-    if (signal_hz > 0.0) {
-        window_samples = (size_t)llround((periods_to_show * fs_hz) / signal_hz);
+    if (display_window_us > 0.0) {
+        window_samples = (size_t)llround(display_window_us * 1e-6 * fs_hz);
     } else {
-        const double window_us = fallback_zoom_us;
-        window_samples = (size_t)llround(window_us * 1e-6 * fs_hz);
+        if (is_high_rate_rf && !is_input && stage_number >= 1u && stage_number <= 5u) {
+            periods_to_show = TRACE_ZOOM_PERIODS_EARLY_RF;
+        }
+        if (!is_input && stage_number >= 6u) {
+            periods_to_show = 30.0;
+        }
+
+        if (signal_hz > 0.0) {
+            window_samples = (size_t)llround((periods_to_show * fs_hz) / signal_hz);
+        } else {
+            const double window_us = fallback_zoom_us;
+            window_samples = (size_t)llround(window_us * 1e-6 * fs_hz);
+        }
     }
 
     if (window_samples < 2u) {
@@ -1719,7 +1694,7 @@ void write_trace_stage_artifacts(
 
     write_real_trace_csv(csv_path, ref, sig, n, max_points);
     {
-        const size_t trace_window_samples = trace_zoom_window_samples(n, fs_hz, stage_number, is_input, signal_hz);
+        const size_t trace_window_samples = trace_zoom_window_samples(n, fs_hz, stage_number, is_input, signal_hz, -1.0);
         write_trace_svg(svg_path, ref, sig, n, max_points, title, fs_hz, trace_window_samples);
     }
 }
@@ -1863,14 +1838,20 @@ static int write_complex_trace_svg(
         return -1;
     }
 
+    const int is_baseband_trace = (max_points <= 500u);
+
+    if (is_baseband_trace) {
+        nout = window_n;
+    }
+
     for (i = 0u; i < nout; ++i) {
-        const Complex v = trace_sample_complex_linear(sig, window_n, i, nout);
+        const Complex v = is_baseband_trace ? sig[i] : trace_sample_complex_linear(sig, window_n, i, nout);
         ymin = fmin(ymin, fmin(v.re, v.im));
         ymax = fmax(ymax, fmax(v.re, v.im));
     }
     if (overlay_sig && overlay_n > 1u) {
         for (i = 0u; i < nout; ++i) {
-            const Complex v = trace_sample_complex_linear(overlay_sig, overlay_n, i, nout);
+            const Complex v = is_baseband_trace ? overlay_sig[i] : trace_sample_complex_linear(overlay_sig, overlay_n, i, nout);
             ymin = fmin(ymin, fmin(v.re, v.im));
             ymax = fmax(ymax, fmax(v.re, v.im));
         }
@@ -1937,44 +1918,92 @@ static int write_complex_trace_svg(
         fprintf(f, "<text transform=\"translate(24,%.2f) rotate(-90)\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Amplitude (V)</text>\n", (double)(mt + plot_h * 0.5));
 
         if (overlay_sig && overlay_n > 1u) {
-            /* Previous-stage I curve (dashed overlay). */
-            fprintf(f, "<polyline fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"1.2\" stroke-opacity=\"0.85\" stroke-dasharray=\"5 4\" points=\"");
+            if (is_baseband_trace) {
+                fprintf(f, "<polyline fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"1.2\" stroke-opacity=\"0.85\" stroke-dasharray=\"5 4\" points=\"");
+                for (i = 0u; i < nout; ++i) {
+                    const Complex v = overlay_sig[i];
+                    fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.re) * y_scale);
+                }
+                fprintf(f, "\"/>\n");
+                fprintf(f, "<polyline fill=\"none\" stroke=\"#cbd5e1\" stroke-width=\"1.2\" stroke-opacity=\"0.85\" stroke-dasharray=\"5 4\" points=\"");
+                for (i = 0u; i < nout; ++i) {
+                    const Complex v = overlay_sig[i];
+                    fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.im) * y_scale);
+                }
+                fprintf(f, "\"/>\n");
+            } else {
+                fprintf(f, "<polyline fill=\"none\" stroke=\"#94a3b8\" stroke-width=\"1.2\" stroke-opacity=\"0.85\" stroke-dasharray=\"5 4\" points=\"");
+                for (i = 0u; i < nout; ++i) {
+                    const Complex v = trace_sample_complex_linear(overlay_sig, overlay_n, i, nout);
+                    fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.re) * y_scale);
+                }
+                fprintf(f, "\"/>\n");
+                fprintf(f, "<polyline fill=\"none\" stroke=\"#cbd5e1\" stroke-width=\"1.2\" stroke-opacity=\"0.85\" stroke-dasharray=\"5 4\" points=\"");
+                for (i = 0u; i < nout; ++i) {
+                    const Complex v = trace_sample_complex_linear(overlay_sig, overlay_n, i, nout);
+                    fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.im) * y_scale);
+                }
+                fprintf(f, "\"/>\n");
+            }
+        }
+
+        if (is_baseband_trace) {
+            fprintf(f, "<polyline fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"1.5\" stroke-opacity=\"0.8\" points=\"");
             for (i = 0u; i < nout; ++i) {
-                const Complex v = trace_sample_complex_linear(overlay_sig, overlay_n, i, nout);
+                const Complex v = sig[i];
                 fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.re) * y_scale);
             }
             fprintf(f, "\"/>\n");
-
-            /* Previous-stage Q curve (dashed overlay). */
-            fprintf(f, "<polyline fill=\"none\" stroke=\"#cbd5e1\" stroke-width=\"1.2\" stroke-opacity=\"0.85\" stroke-dasharray=\"5 4\" points=\"");
+            fprintf(f, "<polyline fill=\"none\" stroke=\"#ef4444\" stroke-width=\"1.5\" stroke-opacity=\"0.8\" points=\"");
             for (i = 0u; i < nout; ++i) {
-                const Complex v = trace_sample_complex_linear(overlay_sig, overlay_n, i, nout);
+                const Complex v = sig[i];
+                fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.im) * y_scale);
+            }
+            fprintf(f, "\"/>\n");
+
+            for (i = 0u; i < nout; ++i) {
+                const double cx = (double)ml + (double)i * x_scale;
+                const double iy = (double)mt + (ymax - sig[i].re) * y_scale;
+                const double qy = (double)mt + (ymax - sig[i].im) * y_scale;
+                fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"2.5\" fill=\"#3b82f6\" stroke=\"#1e40af\" stroke-width=\"0.8\"/>\n", cx, iy);
+                fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"2.5\" fill=\"#ef4444\" stroke=\"#991b1b\" stroke-width=\"0.8\"/>\n", cx, qy);
+            }
+
+            {
+                const size_t samples_per_symbol = (fs_hz > 0.0 && window_n > 1u) ? (size_t)((double)window_n / 20.0) : 1u;
+                if (samples_per_symbol > 1u && samples_per_symbol < nout) {
+                    size_t sym_idx;
+                    for (sym_idx = 0u; sym_idx * samples_per_symbol < nout; ++sym_idx) {
+                        const double sx = (double)ml + (double)(sym_idx * samples_per_symbol) * x_scale;
+                        fprintf(f, "<line x1=\"%.2f\" y1=\"%.2f\" x2=\"%.2f\" y2=\"%.2f\" stroke=\"#64748b\" stroke-width=\"2.0\" stroke-dasharray=\"4 3\" opacity=\"0.8\"/>\n",
+                                sx, (double)mt, sx, (double)(height - mb));
+                    }
+                }
+            }
+        } else {
+            fprintf(f, "<polyline fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"1.5\" stroke-opacity=\"0.8\" points=\"");
+            for (i = 0u; i < nout; ++i) {
+                const Complex v = trace_sample_complex_linear(sig, window_n, i, nout);
+                fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.re) * y_scale);
+            }
+            fprintf(f, "\"/>\n");
+            fprintf(f, "<polyline fill=\"none\" stroke=\"#ef4444\" stroke-width=\"1.5\" stroke-opacity=\"0.8\" points=\"");
+            for (i = 0u; i < nout; ++i) {
+                const Complex v = trace_sample_complex_linear(sig, window_n, i, nout);
                 fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.im) * y_scale);
             }
             fprintf(f, "\"/>\n");
         }
 
-        /* I curve */
-        fprintf(f, "<polyline fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"1.5\" stroke-opacity=\"0.8\" points=\"");
-        for (i = 0u; i < nout; ++i) {
-            const Complex v = trace_sample_complex_linear(sig, window_n, i, nout);
-            fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.re) * y_scale);
+        fprintf(f, "<text x=\"%d\" y=\"%d\" font-family=\"sans-serif\" font-size=\"14\" fill=\"#3b82f6\">In-Phase (I)</text>\n", ml + 10, mt + (int)plot_h + 25);
+        fprintf(f, "<text x=\"%d\" y=\"%d\" font-family=\"sans-serif\" font-size=\"14\" fill=\"#ef4444\">Quadrature (Q)</text>\n", ml + 10, mt + (int)plot_h + 45);
+        if (is_baseband_trace) {
+            fprintf(f, "<text x=\"%d\" y=\"%d\" font-family=\"monospace\" font-size=\"12\" fill=\"#64748b\">%zu samples | dots=actual symbols | dashed=symbol boundaries</text>\n", ml + 10, mt + (int)plot_h + 65, nout);
         }
-        fprintf(f, "\"/>\n");
-
-        /* Q curve */
-        fprintf(f, "<polyline fill=\"none\" stroke=\"#ef4444\" stroke-width=\"1.5\" stroke-opacity=\"0.8\" points=\"");
-        for (i = 0u; i < nout; ++i) {
-            const Complex v = trace_sample_complex_linear(sig, window_n, i, nout);
-            fprintf(f, "%.2f,%.2f ", (double)ml + (double)i * x_scale, (double)mt + (ymax - v.im) * y_scale);
-        }
-        fprintf(f, "\"/>\n");
-
-        fprintf(f, "<text x=\"%d\" y=\"%d\" font-family=\"sans-serif\" font-size=\"14\" fill=\"#3b82f6\">In-Phase (I)</text>\n", ml + 10, mt + 20);
-        fprintf(f, "<text x=\"%d\" y=\"%d\" font-family=\"sans-serif\" font-size=\"14\" fill=\"#ef4444\">Quadrature (Q)</text>\n", ml + 10, mt + 40);
         if (overlay_sig && overlay_n > 1u) {
+            const int overlay_y = is_baseband_trace ? mt + (int)plot_h + 81 : mt + (int)plot_h + 65;
             const char* lbl = overlay_label ? overlay_label : "Previous stage";
-            fprintf(f, "<text x=\"%d\" y=\"%d\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#64748b\">%s I/Q (dashed)</text>\n", ml + 10, mt + 60, lbl);
+            fprintf(f, "<text x=\"%d\" y=\"%d\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#64748b\">%s I/Q (dashed)</text>\n", ml + 10, overlay_y, lbl);
         }
         fprintf(f, "</svg>\n");
         fclose(f);
@@ -1982,7 +2011,7 @@ static int write_complex_trace_svg(
     }
 }
 
-void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* file_prefix, size_t stage_number, int is_input, const char* raw_stage_name, const StageMetric* metric, const Complex* sig, size_t nsym, double fs_hz, double signal_hz) {
+void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* file_prefix, size_t stage_number, int is_input, const char* raw_stage_name, const StageMetric* metric, const Complex* sig, size_t nsym, double fs_hz, double signal_hz, double display_window_us) {
     static Complex* rf_prev_postmix_window = NULL;
     static size_t rf_prev_postmix_n = 0u;
     char svg_path[1024];
@@ -1990,7 +2019,7 @@ void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* fi
     StageRenderInfo info;
     const int is_rf_postmix_stage = (!is_input && file_prefix && strcmp(file_prefix, "rf") == 0 && stage_number >= 6u);
     const int is_limiter_stage = (raw_stage_name && strstr(raw_stage_name, "limiter") != NULL);
-    const size_t trace_window_samples = trace_zoom_window_samples(nsym, fs_hz, stage_number, is_input, signal_hz);
+    const size_t trace_window_samples = trace_zoom_window_samples(nsym, fs_hz, stage_number, is_input, signal_hz, display_window_us);
     const size_t window_n = (trace_window_samples > 1u && trace_window_samples < nsym) ? trace_window_samples : nsym;
     const Complex* overlay_sig = NULL;
     size_t overlay_n = 0u;
@@ -2010,19 +2039,7 @@ void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* fi
     }
 
     {
-        char csv_path[1024];
-        if (is_input) {
-            snprintf(csv_path, sizeof(csv_path), "%s/%s_input_trace.csv", svg_run_dir, file_prefix);
-        } else {
-            snprintf(csv_path, sizeof(csv_path), "%s/%s_stage_%02zu_%s_trace.csv", svg_run_dir, file_prefix, stage_number, info.stage_slug);
-        }
-        /* Limit CSV to 100,000 points to keep file sizes reasonable */
-        write_complex_trace_csv(csv_path, sig, nsym, 100000u);
-    }
-
-    {
-        /* Use 8000 render points for dense traces like old version */
-        const size_t trace_render_points = 8000u;
+        const size_t trace_render_points = (stage_number >= 6u) ? 200u : 8000u;  /* 200 symbol samples for baseband, no interpolation */
         write_complex_trace_svg(svg_path, sig, nsym, trace_render_points, title, fs_hz, trace_window_samples, overlay_sig, overlay_n, "Previous stage");
     }
 

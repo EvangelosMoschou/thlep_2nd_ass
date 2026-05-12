@@ -42,6 +42,23 @@ typedef struct SimConfig {
     double t0_k;              /* Reference temperature (290 K standard) */
     double rf_sample_rate_hz; /* RF sampling rate for brute-force sim (e.g., 96 GHz) */
     unsigned int seed;        /* PRNG seed for reproducibility */
+    int run_bb;               /* Run complex baseband path (default: 0) */
+    int run_rf;               /* Run RF baseline path (default: 1) */
+    int run_realistic;        /* Run realistic impairment path (default: 1) */
 } SimConfig;
+
+/**
+ * @brief Global toggles for realistic-path impairment modeling.
+ *
+ * When enabled, the corresponding impairment parameters from StageModel
+ * are applied during simulation.
+ */
+typedef struct RealisticPathConfig {
+    int enable_lo_phase_noise;    /**< Apply LO phase noise */
+    int enable_iq_gain_error;     /**< Apply I/Q gain mismatch */
+    int enable_iq_phase_error;    /**< Apply I/Q phase error */
+    int enable_am_pm;             /**< Apply AM-to-PM conversion */
+    int enable_butterworth;       /**< Use Butterworth filter instead of moving-average */
+} RealisticPathConfig;
 
 #endif
