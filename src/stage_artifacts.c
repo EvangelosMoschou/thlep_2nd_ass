@@ -2039,7 +2039,7 @@ void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* fi
     }
 
     {
-        const size_t trace_render_points = 8000u;  /* 8000 render points for smooth interpolation on all stages */
+        const size_t trace_render_points = (stage_number >= 6u) ? 400u : 8000u;  /* 8000 render points for smooth interpolation on all stages */
         write_complex_trace_svg(svg_path, sig, nsym, trace_render_points, title, fs_hz, trace_window_samples, overlay_sig, overlay_n, "Previous stage");
     }
 

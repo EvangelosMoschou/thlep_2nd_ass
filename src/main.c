@@ -1379,6 +1379,13 @@ static int simulate_bruteforce_rf(
     apply_stage_soa(&stage, bb_ref_re, bb_ref_im, bb_sig_re, bb_sig_im, nbb,
                     "rf_to_bb", N_t0_W, &N_current, &Gain_total, P_sig_in_W);
 
+    /* Write trace using continuous baseband waveform (match stage 6 format) */
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    write_complex_trace_stage_artifacts(
+        trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+
+    /* Downsample for metrics */
     pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
     size_t ref_eval_n = synchronize_and_downsample(
         temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
@@ -1405,10 +1412,6 @@ static int simulate_bruteforce_rf(
         csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, stage.name,
         &metrics[m], "RF", constellation_template, constellation_count,
         tx_symbols, sig_sym, eval_n);
-    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
-    write_complex_trace_stage_artifacts(
-        trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
-        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
     ++m;
   }
 
@@ -1667,7 +1670,7 @@ static int simulate_realistic_rf(
     }
   }
 
-  prng_init_parallel(rng_threads, (uint32_t)cfg->seed);
+  prng_init_parallel(rng_threads, (uint32_t)(cfg->seed + 1u));
 
   double t0 = omp_get_wtime();
   double t_pulse = 0, t_rf_stages = 0, t_downconv = 0, t_bb_stages = 0;
@@ -1931,6 +1934,15 @@ static int simulate_realistic_rf(
       }
     }
 
+    snprintf(realistic_stage_name, sizeof(realistic_stage_name), "%s Realistic", stage.name);
+
+    /* Write trace using continuous baseband waveform (match stage 6 format) */
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    write_complex_trace_stage_artifacts(
+        trace_dir, "traces", rf_stage_count + 2u + i, 0, realistic_stage_name, &metrics[m],
+        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+
+    /* Downsample for metrics */
     pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
     size_t ref_eval_n = synchronize_and_downsample(
         temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, ref_sym);
@@ -1950,15 +1962,10 @@ static int simulate_realistic_rf(
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
     }
 
-    snprintf(realistic_stage_name, sizeof(realistic_stage_name), "%s Realistic", stage.name);
     write_constellation_stage_artifacts(
         csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, realistic_stage_name,
         &metrics[m], "RF", constellation_template, constellation_count,
         tx_symbols, sig_sym, eval_n);
-    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
-    write_complex_trace_stage_artifacts(
-        trace_dir, "traces", rf_stage_count + 2u + i, 0, realistic_stage_name, &metrics[m],
-        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
     ++m;
   }
 
