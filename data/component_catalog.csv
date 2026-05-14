@@ -1,14 +1,2 @@
-component_uid,component_name,part_number,gain_loss_db,noise_figure_db,phase_noise_dbchz,output_power_db,p1db_db,oip3_db,iip3_db,comment
-SPST_SWITCH_01,SPST switch,MA4AGSW1,-0.3,,,,,,,Disconnects the Rx during Tx
-FILTER_1_01,Filter 1,ZVBP-K27G+,-0.4,0.4,,,,,,ultra low insertion loss
-LNA_1_01,LNA 1,ADL8142S,29,1.8,,,8.5,17.5,,slightly lower NF
-MIXER_1_01,Mixer 1,HMC264LC3B,-9,,,needs 17dBm,2,,14,
-LO_1_01,LO 1,HMC582LP5E,,,-110,5-12,,,,
-LO_1_AMP_01,LO 1 AMP,ZVA-01243+,12.9,,,,22.5,29.5,,
-FILTER_2_01,Filter 2,SXBP-1430+,-0.6,0.6,,,,,,Extremely low insertion loss
-LNA_2_01,LNA 2,SAV-541-DG+,23.7,0.27,,,18.5,27.8,,
-MIXER_2_01,Mixer 2,SYM-25DHW+,-6.5,,,needs 17-19,14,,30,
-LO_2_01,LO 2,JTOS-850VW+,9,,-143,9dBm,,,,
-LO_2_AMP_01,LO 2 AMP,PMA5-83-2W+,12,3.7,,,30,44,,
-FILTER_3_01,Filter 3,BFTC-500+,-3,,,,,,,,
-LNA_3_01,LNA 3,ZHL-20W-13SWX+,50,3.5,,,41,43,,
+Component,Role,Gain(dB),NF(dB),P1dB(dBm),IP3(dBm)
+... (rest of component_catalog.csv) ...
