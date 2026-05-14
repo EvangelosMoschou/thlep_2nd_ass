@@ -2,18 +2,20 @@
 #define MATH_UTILS_H
 
 #include <math.h>
-#include "sim_types.h"
 
-static inline double db_to_lin_power(double db) {
-    return pow(10.0, db / 10.0);
-}
-
+/**
+ * @brief Linear power to dB.
+ */
 static inline double lin_to_db(double lin) {
-    return 10.0 * log10(lin + 1e-25);
+    if (lin <= 0.0) return -1000.0;
+    return 10.0 * log10(lin);
 }
 
-static inline double complex_abs_sq(Complex c) {
-    return c.re * c.re + c.im * c.im;
+/**
+ * @brief dB to linear power.
+ */
+static inline double db_to_lin(double db) {
+    return pow(10.0, db / 10.0);
 }
 
 #endif

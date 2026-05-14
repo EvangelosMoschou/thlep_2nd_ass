@@ -1,10 +1,21 @@
 #ifndef SIGNAL_CHAIN_H
 #define SIGNAL_CHAIN_H
 
+#include <stddef.h>
 #include "sim_types.h"
 #include "stage_models.h"
+#include "metrics.h"
 
-void apply_stage_soa(const StageModel* stg, double* ref_re, double* ref_im, double* sig_re, double* sig_im, size_t n, const char* domain, double N_t0_W, double* N_current, double* Gain_total, double P_sig_in);
-StageMetric apply_stage_real_fused(const StageModel* stg, double* ref, double* sig, size_t n, const char* domain, double N_t0_W, double fs_hz, double fc_hz, double* N_current, double* Gain_total, double P_sig_in);
+/**
+ * generate_symbols — Generate random 64-APSK symbols
+ */
+void generate_symbols(const Complex *constellation, size_t constellation_size,
+                      Complex *out_symbols, unsigned short *out_labels,
+                      size_t nsym);
+
+/**
+ * calculate_evm — Compute EVM between reference and impaired symbols
+ */
+double calculate_evm(const Complex *ref, const Complex *sig, size_t nsym);
 
 #endif

@@ -3,10 +3,19 @@
 
 #include <stddef.h>
 
-#define TOPOLOGY_SIM_COUNT 4
-#define OUTPUT_ROOT_DIR "out"
+/**
+ * clean_output_dir — Remove all files in a directory (non-recursive)
+ *
+ * Returns:
+ *   0 on success
+ *   -1 on error (e.g. directory not found)
+ */
+int clean_output_dir(const char *path);
 
-int ensure_output_dirs(const char* root, int slot_id);
-int clean_output_dir(const char* path);
+/**
+ * get_run_dir — Construct a path string for a specific simulation run
+ */
+int get_run_dir(char *buf, size_t n, const char *base, int topology_id,
+                const char *path_type);
 
 #endif

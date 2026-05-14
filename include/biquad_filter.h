@@ -1,26 +1,38 @@
+/**
+ * @file biquad_filter.h
+ * @brief Digital biquad (Direct Form II) filter implementation.
+ *
+ * Used for implementing higher-order filters (like Butterworth) as a
+ * cascade of second-order sections (SOS).
+ */
+
 #ifndef BIQUAD_FILTER_H
 #define BIQUAD_FILTER_H
 
-#include <stddef.h>
+/**
+ * @brief Biquad filter coefficients (Direct Form II).
+ * H(z) = (b0 + b1*z^-1 + b2*z^-2) / (1 + a1*z^-1 + a2*z^-2)
+ */
+typedef struct BiquadCoeffs {
+    double b0, b1, b2;
+    double a1, a2;
+} BiquadCoeffs;
 
-typedef struct {
-    double b[3];
-    double a[3];
-    double w[2]; /* Direct Form II delay elements */
-} BiquadSection;
-
-typedef struct {
-    BiquadSection sections[4];
-    size_t section_count;
+/**
+ * @brief Biquad filter state (delay elements).
+ */
+typedef struct BiquadState {
+    double z1, z2;
 } BiquadState;
 
-typedef struct {
-    double cutoff_hz;
-    double fs_hz;
-    int order;
-} BiquadConfig;
+/**
+ * @brief Process one sample through a biquad stage.
+ */
+double biquad_process(double x, const BiquadCoeffs *c, BiquadState *s);
 
-int biquad_init(BiquadState* state, const BiquadConfig* cfg);
-void biquad_process_soa(BiquadState* state, const double* in_re, const double* in_im, double* out_re, double* out_im, size_t n);
+/**
+ * @brief Compute Butterworth SOS coefficients for a given order and cutoff.
+ */
+int design_butterworth_sos(int order, double fc_fs, BiquadCoeffs *out_sos);
 
 #endif
