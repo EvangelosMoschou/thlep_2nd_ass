@@ -35,6 +35,9 @@
 #include "stage_artifacts.h"
 #include "stage_models.h"
 
+/* --- Propagation analysis (Part D: FSPL, rain, fog, gas, link margin) --- */
+#include "propagation.h"
+
 /* --- Impairment module headers (used by realistic RF path) --- */
 #include "adc_model.h"
 #include "biquad_filter.h"
@@ -2482,9 +2485,28 @@ int main(int argc, char **argv) {
     cfg.input_snr_db = signal_dbm - noise_dbm;
   }
 
-  /* Write input budget artifacts */
-  /* Disabled per user request to only output the exact 4 requirements per stage
-   */
+  /* --- Part D: Propagation Analysis (FSPL, rain, fog, gas, link margin) --- */
+  {
+    PropagationScenario prop_scenario;
+    LinkBudgetResult    prop_budget;
+
+    prop_scenario.frequency_hz         = cfg.carrier_hz;         /* 24 GHz */
+    prop_scenario.distance_km          = 36000.0;                /* GEO orbit */
+    prop_scenario.elevation_deg        = 30.0;                   /* generic elevation */
+    prop_scenario.polarization_deg     = 45.0;                   /* circular (TBD with team) */
+    prop_scenario.rain_rate_mmh        = 10.0;                   /* 0.01% exceedance, generic */
+    prop_scenario.surface_temp_k       = 288.15;                 /* 15 °C */
+    prop_scenario.surface_pressure_hpa = 1013.25;                /* sea level */
+    prop_scenario.water_vapor_gm3      = 7.5;                    /* reference */
+    prop_scenario.liquid_water_gm3     = 0.05;                   /* medium fog */
+    prop_scenario.eirp_dbm             = 85.0;                   /* satellite link */
+    prop_scenario.rx_gain_dbi          = 40.0;                   /* typical ground antenna */
+    prop_scenario.rx_sensitivity_dbm   = -70.0;                  /* placeholder (from Part E) */
+
+    compute_link_budget(&prop_scenario, &prop_budget);
+    print_link_budget(&prop_budget);
+  }
+
   /* --- Load receiver stage configuration from CSV --- */
   if (stage_models_load_csv(resolved_stage_csv_path, &stage_cfg, stage_err,
                             sizeof(stage_err)) != 0) {

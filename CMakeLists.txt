@@ -24,6 +24,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(SOURCES
     src/main.c
     src/prng.c
+    src/propagation.c
     src/stage_models.c
     src/stage_artifacts.c
     src/phase_noise.c
