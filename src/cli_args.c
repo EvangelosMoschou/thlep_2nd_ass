@@ -91,7 +91,7 @@ void cli_print_usage(const char *exe) {
   printf("  --carrier <Hz>        Carrier frequency in Hz (default: 2.4e10)\n");
   printf("  --snr <dB>            Input SNR in dB (default: 20)\n");
   printf("  --stage-csv <path>    Stage-model CSV file or folder (default: "
-         "stage_models/runtime_stage_models_target16.csv)\n");
+          "data_input/receiver_config.csv)\n");
   printf("  --topology-sim <1..4> Output simulation slot under "
          "out/topology_sim_N (default: 1)\n");
   printf("  --stage-sim <1..4>    Alias for --topology-sim\n");
@@ -130,7 +130,7 @@ int parse_cli_args(int argc, char **argv, CliArgs *out) {
   out->run_realistic = 1;           /* Realistic path enabled by default */
   out->topology_sim_id = 1;         /* Default output slot: topology_sim_1 */
   snprintf(out->stage_csv_path, CLI_CSV_PATH_MAX, "%s",
-           "stage_models/runtime_stage_models_target16.csv");
+            "data_input/receiver_config.csv");
 
   out->realistic_cfg.enable_lo_phase_noise = 1;
   out->realistic_cfg.enable_iq_gain_error = 1;

@@ -25,6 +25,8 @@ set(SOURCES
     src/main.c
     src/prng.c
     src/propagation.c
+    src/cascade.c
+    src/component_catalog.c
     src/stage_models.c
     src/stage_artifacts.c
     src/phase_noise.c

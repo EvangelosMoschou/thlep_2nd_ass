@@ -79,39 +79,29 @@ int ensure_output_dirs(const char *base, int topology_id) {
     return -1;
   }
 
-  /* Flat output subdirectories */
-  snprintf(sub, sizeof(sub), "%s/csv", base);
-  if (ensure_dir_exists(sub) != 0) return -2;
-
-  snprintf(sub, sizeof(sub), "%s/constellations", base);
-  if (ensure_dir_exists(sub) != 0) return -3;
-
-  snprintf(sub, sizeof(sub), "%s/traces", base);
-  if (ensure_dir_exists(sub) != 0) return -4;
-
   /* RF baseline subdirectories */
   snprintf(sub, sizeof(sub), "%s/rf_baseline", base);
-  if (ensure_dir_exists(sub) != 0) return -5;
+  if (ensure_dir_exists(sub) != 0) return -2;
   snprintf(sub, sizeof(sub), "%s/rf_baseline/csv", base);
-  if (ensure_dir_exists(sub) != 0) return -6;
+  if (ensure_dir_exists(sub) != 0) return -3;
 
   snprintf(sub, sizeof(sub), "%s/rf_baseline/constellations", base);
-  if (ensure_dir_exists(sub) != 0) return -7;
+  if (ensure_dir_exists(sub) != 0) return -4;
 
   snprintf(sub, sizeof(sub), "%s/rf_baseline/traces", base);
-  if (ensure_dir_exists(sub) != 0) return -8;
+  if (ensure_dir_exists(sub) != 0) return -5;
 
   /* Realistic impairment subdirectories */
   snprintf(sub, sizeof(sub), "%s/realistic", base);
-  if (ensure_dir_exists(sub) != 0) return -9;
+  if (ensure_dir_exists(sub) != 0) return -6;
   snprintf(sub, sizeof(sub), "%s/realistic/csv", base);
-  if (ensure_dir_exists(sub) != 0) return -10;
+  if (ensure_dir_exists(sub) != 0) return -7;
 
   snprintf(sub, sizeof(sub), "%s/realistic/constellations", base);
-  if (ensure_dir_exists(sub) != 0) return -11;
+  if (ensure_dir_exists(sub) != 0) return -8;
 
   snprintf(sub, sizeof(sub), "%s/realistic/traces", base);
-  if (ensure_dir_exists(sub) != 0) return -12;
+  if (ensure_dir_exists(sub) != 0) return -9;
 
   return 0;
 }

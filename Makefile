@@ -2,21 +2,22 @@ CC ?= gcc
 CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -Iinclude -fopenmp
 LDFLAGS ?= -lm -fopenmp
 
-SRC := src/main.c src/prng.c src/propagation.c src/stage_models.c src/stage_artifacts.c src/phase_noise.c src/adc_model.c src/iq_imbalance.c src/flicker_noise.c src/biquad_filter.c src/constellation.c src/metrics.c src/cli_args.c src/output_mgr.c src/signal_chain.c src/sim_baseband.c
+SRC := main.c prng.c propagation.c cascade.c component_catalog.c stage_models.c stage_artifacts.c phase_noise.c adc_model.c iq_imbalance.c flicker_noise.c biquad_filter.c constellation.c metrics.c cli_args.c output_mgr.c signal_chain.c sim_baseband.c
 BIN_DIR := bin
 OUT_DIR := out
 BIN := $(BIN_DIR)/dual_receiver_sim
+VPATH := src
 
 .PHONY: all run sweep clean
 
 all: $(BIN)
 
-OBJS := $(SRC:.c=.o)
+OBJS := $(addprefix $(BIN_DIR)/, $(SRC:.c=.o))
 
 $(BIN_DIR) $(OUT_DIR):
 	mkdir -p $@
 
-src/%.o: src/%.c | $(OUT_DIR)
+$(BIN_DIR)/%.o: src/%.c | $(OUT_DIR) $(BIN_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BIN): $(OBJS) | $(BIN_DIR) $(OUT_DIR)
@@ -31,4 +32,3 @@ sweep: $(BIN)
 clean:
 	rm -rf $(BIN_DIR)
 	rm -rf $(OUT_DIR)
-	rm -f $(OBJS)

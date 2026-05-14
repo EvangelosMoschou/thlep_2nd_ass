@@ -1,88 +1,145 @@
 # receiver_dual_sim
 
-Dual-path receiver simulation workspace for DVB-S2X 64-APSK analysis.
+24 GHz K-band satellite receiver simulator for DVB-S2X 64-APSK.
+Implements full RF front-end cascade analysis (Part E), ITU-R propagation
+models (Part D), and dual-path stage-by-stage signal simulation.
 
-This repository combines:
-- A C simulation engine for stage-by-stage RF/baseband processing and trace artifacts.
-- A MATLAB reference script for constellation-domain validation and comparison.
-
-## Folder Structure
-
-```text
-receiver_dual_sim/
-|-- Makefile
-|-- README.md
-|-- EXPLANATION.md
-|-- bin/
-|-- data/
-|-- include/
-|-- matlab/
-|-- out/
-|   |-- baseband/
-|   |-- rf/
-|   `-- matlab/
-|-- out_sweep/
-|-- scripts/
-|-- src/
-`-- stage_models/
-```
-
-## What Each Folder Contains
-
-- `bin/`
-  - Compiled executables (for example `dual_receiver_sim`).
-
-- `data/`
-  - Optional input datasets used by helper tools or experiments.
-
-- `include/`
-  - Public headers for simulation types and module interfaces.
-
-- `matlab/`
-  - MATLAB reference implementation and plotting scripts.
-  - Main script: `sim_receiver_matlab.m`.
-
-- `out/`
-  - Generated runtime artifacts.
-  - `out/baseband/`: C baseband-stage CSV/SVG outputs.
-  - `out/rf/`: C RF-stage CSV/SVG outputs.
-  - `out/matlab/`: MATLAB-generated figures.
-
-- `out_sweep/`
-  - Generated artifacts from design-space sweeps (batch exploration).
-
-- `scripts/`
-  - Utility scripts (automation, sweeps, helpers).
-
-- `src/`
-  - C source code for the core simulation pipeline and artifact rendering.
-
-- `stage_models/`
-  - Stage-chain CSV definitions used by C runtime.
-  - Active profile: `runtime_stage_models_target16.csv`.
-
-## Visualization Policy (Current)
-
-- Signal/time traces are taken from the C simulation outputs because the C RF path is the runtime-faithful waveform path.
-- Constellation comparisons are taken from MATLAB outputs because the MATLAB reference path applies symbol-domain alignment steps intended for clean constellation evaluation.
-
-See `EXPLANATION.md` for full rationale and technical details.
-
-## Build And Run (C)
-
-From `receiver_dual_sim/`:
+## Quick Start
 
 ```bash
 make
-./bin/dual_receiver_sim --stage-csv stage_models/runtime_stage_models_target16.csv
+./run.sh
 ```
 
-## Run MATLAB Reference Plots
+Output goes to `out/rf_baseline/` and `out/realistic/` with CSV metrics,
+constellation SVGs, and time-domain trace SVGs per receiver stage.
 
-From `receiver_dual_sim/matlab/`:
+## Folder Structure
+
+```
+receiver_dual_sim/
+├── data_input/
+│   └── receiver_config.csv       ← Single config: chain topology + datasheet specs
+├── src/
+│   ├── main.c                    ← Orchestrator: CLI, cascade, propagation, simulation
+│   ├── propagation.c             ← Part D: FSPL, rain (P.838-3), fog (P.840-9), gas (P.676-13)
+│   ├── cascade.c                 ← Part E: Friis NF, IIP3, dynamic range, sensitivity
+│   ├── component_catalog.c       ← Loads datasheet values from receiver_config.csv
+│   ├── signal_chain.c            ← Per-stage signal processing (gain, noise, nonlinearity)
+│   ├── sim_baseband.c            ← Complex baseband analytical path
+│   ├── stage_models.c            ← CSV-driven stage chain loader
+│   ├── stage_artifacts.c         ← SVG/CSV artifact generation
+│   ├── phase_noise.c, iq_imbalance.c, flicker_noise.c, adc_model.c, biquad_filter.c
+│   ├── constellation.c, metrics.c, cli_args.c, output_mgr.c, prng.c
+├── include/                      ← Headers for all modules
+├── matlab/
+│   ├── sim_receiver_matlab.m     ← MATLAB reference simulation
+│   ├── CascadeAnalyzer.m         ← Cascade analysis (teammate)
+│   ├── propagation_losses.m      ← Propagation sweep (teammate)
+│   ├── build_simulink_model.m    ← Simulink model generator
+│   ├── measure_i_vpp.m, export_figure_png_svg.m, plot_trace_like_c.m
+├── docs/
+│   ├── part_d_propagation.md     ← Part D documentation
+│   └── part_e_cascade.md         ← Part E documentation
+├── scripts/
+│   └── run_component_sweep.py    ← Batch sweep automation
+├── Makefile, CMakeLists.txt
+└── run.sh                        ← Launcher (works from anywhere, even double-click)
+```
+
+## Parts Implemented
+
+| Part | Description | Module |
+|------|-------------|--------|
+| **D** | Propagation: FSPL, rain (P.838-3), fog (P.840-9), gas (P.676-13), link margin | `propagation.c` |
+| **E** | Receiver cascade: Friis NF, IIP3, P1dB, dynamic range, sensitivity | `cascade.c` |
+| **F** | Full receiver simulation with stage-by-stage metrics | `main.c` + `signal_chain.c` |
+
+### Part D — Link Budget
+
+```
+EIRP (85 dBm)
+  − FSPL (211.18 dB @ 24 GHz, GEO)
+  − Rain attenuation (11.18 dB @ 10 mm/h)
+  − Fog attenuation (0.03 dB)
+  − Gas attenuation (0.44 dB)
+  + Rx antenna gain (40 dBi)
+= Received power (−97.83 dBm)
+  − Sensitivity (−61.88 dBm from cascade)
+= Margin (−35.94 dB)
+```
+
+All ITU-R models implemented from the original recommendation formulas:
+P.838-3 curve-fit, P.840-9 double-Debye, P.676-13 reference model.
+
+### Part E — Cascade Analysis
+
+```
+Total Gain:       79.36 dB
+Total NF:          2.58 dB
+Total IIP3:      −36.44 dBm
+Sensitivity:     −61.88 dBm  (64-APSK, 200 MHz)
+LDR:              42.69 dB
+SFDR:             35.52 dB
+```
+
+Component IIP3/P1dB values come from **datasheet values** in
+`data_input/receiver_config.csv` (LNA1 ADL8142S: OIP3=17.5 dBm,
+Mixer1 HMC264LC3B: IIP3=14 dBm, etc.), overriding the runtime CSV.
+
+## Build
 
 ```bash
-matlab -batch "sim_receiver_matlab"
+make          # Uses GCC + OpenMP
+make clean    # Remove binaries and output
 ```
 
-Generated figures are saved under `out/matlab/`.
+Or via CMake:
+```bash
+mkdir build && cd build && cmake .. && make
+```
+
+## Run
+
+```bash
+./run.sh                                    # Default: RF + realistic paths
+./run.sh --symbols 100 --disable-rf         # Fewer symbols, no RF
+./run.sh --seed 42 --snr 25                 # Custom seed and SNR
+```
+
+Flags: `--symbols`, `--snr`, `--seed`, `--carrier`, `--symbol-rate`,
+`--stage-csv`, `--enable-bb`, `--disable-rf`, `--disable-realistic`.
+
+## Output
+
+```
+out/
+├── rf_baseline/
+│   ├── csv/              ← Per-stage metrics (SNR, EVM, gain, noise power)
+│   ├── constellations/   ← I/Q scatter plots per stage (SVG)
+│   └── traces/           ← Time-domain waveform overlays (SVG)
+└── realistic/
+    ├── csv/
+    ├── constellations/
+    └── traces/
+```
+
+Generated when MATLAB runs:
+```
+out/matlab/               ← MATLAB reference figures
+```
+
+## Configuration
+
+Single file `data_input/receiver_config.csv` drives everything:
+- Chain topology (3 chains: baseband_rx, rf_frontend, rf_postmix_bb)
+- Component parameters (gain, NF, filter length, limiter flag)
+- Datasheet specs (part number, OIP3, IIP3, P1dB)
+
+## MATLAB Reference
+
+```bash
+cd matlab && matlab -batch "sim_receiver_matlab"
+```
+
+Requires Communications Toolbox and Phased Array System Toolbox.

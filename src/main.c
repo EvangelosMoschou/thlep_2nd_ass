@@ -10,8 +10,10 @@
  */
 
 #define _USE_MATH_DEFINES
+#define _GNU_SOURCE
 #include <errno.h>
 #include <limits.h>
+#include <unistd.h>
 #include <math.h>
 #include <omp.h>
 #include <stdio.h>
@@ -37,6 +39,9 @@
 
 /* --- Propagation analysis (Part D: FSPL, rain, fog, gas, link margin) --- */
 #include "propagation.h"
+
+/* --- Cascade analysis (Part E: Friis, IP3, dynamic range, sensitivity) --- */
+#include "cascade.h"
 
 /* --- Impairment module headers (used by realistic RF path) --- */
 #include "adc_model.h"
@@ -2133,14 +2138,52 @@ static int parse_double(const char *s, double *out) {
 }
 
 /*
+ * resolve_project_root — Find the project root directory from the executable path.
+ *
+ * Uses /proc/self/exe to get the binary's absolute path, then strips
+ * "/bin/dual_receiver_sim" to get the project root.  This makes all
+ * relative paths (data_input/, out/) work regardless of how the binary
+ * is launched (terminal, double-click, etc.).
+ *
+ * Parameters:
+ *   buf       — Output buffer for the project root path
+ *   buf_size  — Size of the output buffer
+ *
+ * Returns:
+ *   0 on success, -1 on error
+ */
+static int resolve_project_root(char *buf, size_t buf_size) {
+    char exe_path[1024];
+    ssize_t len;
+    char *p;
+
+    len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
+    if (len <= 0) return -1;
+    exe_path[len] = '\0';
+
+    /* Strip "/bin/dual_receiver_sim" to get project root.
+     * Works for any binary name under any "bin/"-like dir. */
+    p = strrchr(exe_path, '/');
+    if (!p) return -1;
+    *p = '\0';          /* remove binary name */
+    p = strrchr(exe_path, '/');
+    if (!p) return -1;
+    *p = '\0';          /* remove bin/ directory */
+
+    if (strlen(exe_path) >= buf_size) return -1;
+    snprintf(buf, buf_size, "%s", exe_path);
+    return 0;
+}
+
+/*
  * resolve_stage_csv_path — Resolve a stage CSV path (file or directory)
  *
  * What it does:
- *   If the user provides a DIRECTORY path (e.g., "stage_models/"), this
+ *   If the user provides a DIRECTORY path (e.g., "data_input/"), this
  * function resolves it to the specific "runtime_stage_models.csv" file inside
  * that directory. If the user provides a FILE path, it's used as-is.
  *
- *   This exists because the stage_models/ directory may contain multiple CSV
+ *   This exists because the data_input/ directory may contain multiple CSV
  * files:
  *   - stage_models.csv               — design reference / topology sketch
  *   - runtime_stage_models.csv       — simulator-ready canonical configuration
@@ -2212,7 +2255,7 @@ static void print_usage(const char *exe) {
   printf("  --carrier <Hz>        Carrier frequency in Hz (default: 2.4e10)\n");
   printf("  --snr <dB>            Input SNR in dB (default: 20)\n");
   printf("  --stage-csv <path>    Stage-model CSV file or folder (default: "
-         "stage_models/runtime_stage_models_target16.csv)\n");
+          "data_input/receiver_config.csv)\n");
   printf("  --topology-sim <1..4> Output simulation slot under "
          "out/topology_sim_N (default: 1)\n");
   printf("  --stage-sim <1..4>    Alias for --topology-sim\n");
@@ -2258,13 +2301,26 @@ static void print_usage(const char *exe) {
  *   9 = Realistic RF simulation error
  */
 int main(int argc, char **argv) {
+  char project_root[512] = "";
   SimConfig cfg;               /* Top-level simulation parameters */
   StageModelsConfig stage_cfg; /* Loaded stage chain configuration */
   char stage_csv_path[512] =
-      "stage_models/runtime_stage_models_target16.csv"; /* Default CSV path */
+      "data_input/receiver_config.csv"; /* Default CSV path */
   char resolved_stage_csv_path[512]; /* Resolved path after directory resolution
                                       */
   char stage_err[256];               /* Error message buffer for CSV loading */
+
+  char out_dir[512] = "out";
+  /* Resolve project root from executable location so paths work even when
+   * the binary is launched by double-click (working dir ≠ project root). */
+  if (resolve_project_root(project_root, sizeof(project_root)) == 0) {
+      /* Prepend project root to the default CSV path */
+      char tmp[512];
+      snprintf(tmp, sizeof(tmp), "%s/%s", project_root, stage_csv_path);
+      snprintf(stage_csv_path, sizeof(stage_csv_path), "%s", tmp);
+      /* Build absolute output directory path */
+      snprintf(out_dir, sizeof(out_dir), "%s/out", project_root);
+  }
   Complex constellation[64]; /* The 64-APSK constellation (stack-allocated) */
   Complex *tx_symbols;       /* Transmitted symbol sequence (heap-allocated) */
   unsigned short *labels; /* Transmitted symbol indices (for potential SER) */
@@ -2307,13 +2363,6 @@ int main(int argc, char **argv) {
   topology_sim_id = 1;                 /* Default output slot: topology_sim_1 */
   memset(&stage_cfg, 0, sizeof(stage_cfg));
   stage_err[0] = '\0';
-
-  RealisticPathConfig realistic_cfg;
-  realistic_cfg.enable_lo_phase_noise = 1;
-  realistic_cfg.enable_iq_gain_error = 1;
-  realistic_cfg.enable_iq_phase_error = 1;
-  realistic_cfg.enable_am_pm = 1;
-  realistic_cfg.enable_butterworth = 1;
 
   /* --- Parse command-line arguments --- */
   for (i = 1; i < argc; ++i) {
@@ -2386,7 +2435,7 @@ int main(int argc, char **argv) {
   prng_init(&rng, cfg.seed);
 
   /* --- Create output directories --- */
-  if (ensure_output_dirs(OUTPUT_ROOT_DIR, topology_sim_id) != 0) {
+  if (ensure_output_dirs(out_dir, topology_sim_id) != 0) {
     fprintf(stderr, "Failed to create output directories under ./out\n");
     return 8;
   }
@@ -2400,43 +2449,24 @@ int main(int argc, char **argv) {
   }
 
   /* --- Build output directory paths --- */
-  char csv_dir[256];
-  char const_dir[256];
-  char trace_dir[256];
-  char rf_metrics_csv_path[256];
   char rf_csv_dir[256];
   char rf_const_dir[256];
   char rf_trace_dir[256];
   char realistic_csv_dir[256];
   char realistic_const_dir[256];
   char realistic_trace_dir[256];
-  if (snprintf(csv_dir, sizeof(csv_dir),
-               OUTPUT_ROOT_DIR "/csv") >= (int)sizeof(csv_dir) ||
-      snprintf(const_dir, sizeof(const_dir), OUTPUT_ROOT_DIR "/constellations") >=
-          (int)sizeof(const_dir) ||
-      snprintf(trace_dir, sizeof(trace_dir), OUTPUT_ROOT_DIR "/traces") >=
-          (int)sizeof(trace_dir) ||
-      snprintf(rf_csv_dir, sizeof(rf_csv_dir), OUTPUT_ROOT_DIR "/rf_baseline/csv") >= (int)sizeof(rf_csv_dir) ||
-      snprintf(rf_const_dir, sizeof(rf_const_dir), OUTPUT_ROOT_DIR "/rf_baseline/constellations") >= (int)sizeof(rf_const_dir) ||
-      snprintf(rf_trace_dir, sizeof(rf_trace_dir), OUTPUT_ROOT_DIR "/rf_baseline/traces") >= (int)sizeof(rf_trace_dir) ||
-      snprintf(realistic_csv_dir, sizeof(realistic_csv_dir), OUTPUT_ROOT_DIR "/realistic/csv") >= (int)sizeof(realistic_csv_dir) ||
-      snprintf(realistic_const_dir, sizeof(realistic_const_dir), OUTPUT_ROOT_DIR "/realistic/constellations") >= (int)sizeof(realistic_const_dir) ||
-      snprintf(realistic_trace_dir, sizeof(realistic_trace_dir), OUTPUT_ROOT_DIR "/realistic/traces") >= (int)sizeof(realistic_trace_dir)) {
+  if (snprintf(rf_csv_dir, sizeof(rf_csv_dir), "%s/rf_baseline/csv", out_dir) >= (int)sizeof(rf_csv_dir) ||
+      snprintf(rf_const_dir, sizeof(rf_const_dir), "%s/rf_baseline/constellations", out_dir) >= (int)sizeof(rf_const_dir) ||
+      snprintf(rf_trace_dir, sizeof(rf_trace_dir), "%s/rf_baseline/traces", out_dir) >= (int)sizeof(rf_trace_dir) ||
+      snprintf(realistic_csv_dir, sizeof(realistic_csv_dir), "%s/realistic/csv", out_dir) >= (int)sizeof(realistic_csv_dir) ||
+      snprintf(realistic_const_dir, sizeof(realistic_const_dir), "%s/realistic/constellations", out_dir) >= (int)sizeof(realistic_const_dir) ||
+      snprintf(realistic_trace_dir, sizeof(realistic_trace_dir), "%s/realistic/traces", out_dir) >= (int)sizeof(realistic_trace_dir)) {
     fprintf(stderr, "Failed to build output subdirectories\n");
-    return 5;
-  }
-  if (snprintf(rf_metrics_csv_path, sizeof(rf_metrics_csv_path),
-               "%s/rf_metrics.csv",
-               csv_dir) >= (int)sizeof(rf_metrics_csv_path)) {
-    fprintf(stderr, "Failed to build aggregate RF metrics CSV path\n");
     return 5;
   }
 
   /* Clear old output files from the selected slot */
-  if (clean_output_dir(csv_dir) != 0 ||
-      clean_output_dir(const_dir) != 0 ||
-      clean_output_dir(trace_dir) != 0 ||
-      clean_output_dir(rf_csv_dir) != 0 ||
+  if (clean_output_dir(rf_csv_dir) != 0 ||
       clean_output_dir(rf_const_dir) != 0 ||
       clean_output_dir(rf_trace_dir) != 0 ||
       clean_output_dir(realistic_csv_dir) != 0 ||
@@ -2485,28 +2515,6 @@ int main(int argc, char **argv) {
     cfg.input_snr_db = signal_dbm - noise_dbm;
   }
 
-  /* --- Part D: Propagation Analysis (FSPL, rain, fog, gas, link margin) --- */
-  {
-    PropagationScenario prop_scenario;
-    LinkBudgetResult    prop_budget;
-
-    prop_scenario.frequency_hz         = cfg.carrier_hz;         /* 24 GHz */
-    prop_scenario.distance_km          = 36000.0;                /* GEO orbit */
-    prop_scenario.elevation_deg        = 30.0;                   /* generic elevation */
-    prop_scenario.polarization_deg     = 45.0;                   /* circular (TBD with team) */
-    prop_scenario.rain_rate_mmh        = 10.0;                   /* 0.01% exceedance, generic */
-    prop_scenario.surface_temp_k       = 288.15;                 /* 15 °C */
-    prop_scenario.surface_pressure_hpa = 1013.25;                /* sea level */
-    prop_scenario.water_vapor_gm3      = 7.5;                    /* reference */
-    prop_scenario.liquid_water_gm3     = 0.05;                   /* medium fog */
-    prop_scenario.eirp_dbm             = 85.0;                   /* satellite link */
-    prop_scenario.rx_gain_dbi          = 40.0;                   /* typical ground antenna */
-    prop_scenario.rx_sensitivity_dbm   = -70.0;                  /* placeholder (from Part E) */
-
-    compute_link_budget(&prop_scenario, &prop_budget);
-    print_link_budget(&prop_budget);
-  }
-
   /* --- Load receiver stage configuration from CSV --- */
   if (stage_models_load_csv(resolved_stage_csv_path, &stage_cfg, stage_err,
                             sizeof(stage_err)) != 0) {
@@ -2517,13 +2525,100 @@ int main(int argc, char **argv) {
     return 5;
   }
 
+  /* --- Load component catalog (datasheet values for IIP3/P1dB) --- */
+  ComponentCatalog component_catalog;
+  memset(&component_catalog, 0, sizeof(component_catalog));
+  {
+      const char *cat_path = resolved_stage_csv_path;
+      if (cat_path[0] == '\0') cat_path = "data_input/receiver_config.csv";
+      if (component_catalog_load(cat_path, &component_catalog) != 0) {
+          fprintf(stderr, "Warning: could not load '%s' — cascade will use CSV values\n",
+                  cat_path);
+      }
+  }
+
+  /* --- Override stage model IIP3/P1dB with catalog datasheet values --- */
+  {
+      int chain_id;
+      for (chain_id = 0; chain_id < STAGE_CHAIN_COUNT; chain_id++) {
+          const StageModel *stages = NULL;
+          size_t n = stage_models_get(&stage_cfg, (StageChainId)chain_id, &stages);
+          size_t i;
+          for (i = 0; i < n; i++) {
+              /* stages[i] is actually mutable since we own stage_cfg */
+              component_catalog_override_stage(
+                  &stage_cfg.chains[chain_id][i], &component_catalog);
+          }
+      }
+  }
+
+  /* --- Part E: Cascade Analysis (Friis, IP3, dynamic range, sensitivity) --- */
+  {
+    CascadeParams    cascade_params;
+    CascadeResult    cascade_result;
+    int              cascade_ret;
+
+    cascade_params.antenna_temp_k = cfg.antenna_temp_k;     /* 150 K */
+    cascade_params.t0_k           = cfg.t0_k;               /* 290 K */
+    cascade_params.bw_hz          = B_NOISE_HZ;             /* 200 MHz */
+    cascade_params.vpp_out        = 1.0;                    /* 1 Vpp */
+    cascade_params.snr_target_db  = cfg.input_snr_db;       /* computed from link budget */
+    cascade_params.snr_required_db = 26.5;                  /* 64-APSK required SNR from assignment table */
+
+    cascade_ret = compute_cascade(&stage_cfg, &cascade_params,
+                                   STAGE_CHAIN_BASEBAND_RX,
+                                   &component_catalog, &cascade_result);
+    if (cascade_ret == 0) {
+      print_cascade(&cascade_result);
+    }
+  }
+
+  /* --- Part D: Propagation Analysis & Link Budget (uses cascade sensitivity) --- */
+  {
+    PropagationScenario prop_scenario;
+    LinkBudgetResult    prop_budget;
+    CascadeParams       tmp_params;
+    CascadeResult       tmp_result;
+    double sensitivity_dbm = -70.0; /* fallback if cascade fails */
+
+    /* Run cascade to get real sensitivity */
+    tmp_params.antenna_temp_k = cfg.antenna_temp_k;
+    tmp_params.t0_k           = cfg.t0_k;
+    tmp_params.bw_hz          = B_NOISE_HZ;
+    tmp_params.vpp_out        = 1.0;
+    tmp_params.snr_target_db  = cfg.input_snr_db;
+    tmp_params.snr_required_db = 26.5;
+
+    if (compute_cascade(&stage_cfg, &tmp_params,
+                         STAGE_CHAIN_BASEBAND_RX,
+                         &component_catalog, &tmp_result) == 0) {
+      sensitivity_dbm = tmp_result.sensitivity_dbm;
+    }
+
+    prop_scenario.frequency_hz         = cfg.carrier_hz;
+    prop_scenario.distance_km          = 36000.0;
+    prop_scenario.elevation_deg        = 30.0;
+    prop_scenario.polarization_deg     = 45.0;                /* circular, TBD with team */
+    prop_scenario.rain_rate_mmh        = 10.0;                /* 0.01% exceedance, generic */
+    prop_scenario.surface_temp_k       = 288.15;
+    prop_scenario.surface_pressure_hpa = 1013.25;
+    prop_scenario.water_vapor_gm3      = 7.5;
+    prop_scenario.liquid_water_gm3     = 0.05;                /* medium fog */
+    prop_scenario.eirp_dbm             = 85.0;
+    prop_scenario.rx_gain_dbi          = 40.0;
+    prop_scenario.rx_sensitivity_dbm   = sensitivity_dbm;     /* from cascade above */
+
+    compute_link_budget(&prop_scenario, &prop_budget);
+    print_link_budget(&prop_budget);
+  }
+
   /* --- Run Simulation Paths --- */
   if (cfg.run_bb) {
     SimBasebandResult bb_result;
     memset(&bb_result, 0, sizeof(bb_result));
     if (simulate_baseband(&cfg, &stage_cfg, constellation, 64u,
                           tx_symbols, (size_t)cfg.symbols, &rng, &bb_result,
-                          csv_dir, const_dir, trace_dir) != 0) {
+                          rf_csv_dir, rf_const_dir, rf_trace_dir) != 0) {
       fprintf(stderr, "Complex-baseband simulation failed\n");
       stage_models_free(&stage_cfg);
       free(tx_symbols);
@@ -2534,9 +2629,6 @@ int main(int argc, char **argv) {
     count_bb = bb_result.count;
     final_vpp_bb = bb_result.final_vpp;
   } else {
-    (void)csv_dir;
-    (void)const_dir;
-    (void)trace_dir;
     (void)metrics_bb;
     (void)count_bb;
     (void)final_vpp_bb;
@@ -2555,7 +2647,7 @@ int main(int argc, char **argv) {
     }
 
     {
-      char rf_metrics_path[256];
+      char rf_metrics_path[512];
       snprintf(rf_metrics_path, sizeof(rf_metrics_path), "%s/rf_metrics.csv", rf_csv_dir);
       if (count_rf > 0u &&
           write_metrics_csv(rf_metrics_path, metrics_rf, count_rf) != 0) {
@@ -2587,7 +2679,7 @@ int main(int argc, char **argv) {
     }
 
     {
-      char realistic_metrics_path[256];
+      char realistic_metrics_path[512];
       snprintf(realistic_metrics_path, sizeof(realistic_metrics_path), "%s/realistic_metrics.csv", realistic_csv_dir);
       if (count_realistic > 0u &&
           write_metrics_csv(realistic_metrics_path, metrics_realistic, count_realistic) != 0) {

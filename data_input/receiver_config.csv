@@ -1,0 +1,23 @@
+chain,name,gain_db,nf_db,filter_len,is_limiter,p1db_dbm,ip3_dbm,ref,enabled,component_uid,part_number,oip3_db,iip3_db,comment
+baseband_rx,bb_00_switch,-0.3,0.3,1,0,,,out,1,SPST_SWITCH_01,MA4AGSW1,,,Disconnects the Rx during Tx
+baseband_rx,bb_01_preselector_bpf,-0.4,0.4,3,0,,,out,1,FILTER_1_01,ZVBP-K27G+,,,ultra low insertion loss
+baseband_rx,bb_02_lna1,29.0,1.8,1,0,8.5,17.5,out,1,LNA_1_01,ADL8142S,17.5,,slightly lower NF
+baseband_rx,bb_03_image_rejection_filter,-3.5,3.5,5,0,,,out,1,,,,,
+baseband_rx,bb_04_mixer1,-9.0,9.0,1,0,2.0,5.0,out,1,MIXER_1_01,HMC264LC3B,,14,
+baseband_rx,bb_05_bpf2,-0.6,0.6,5,0,,,out,1,FILTER_2_01,SXBP-1430+,,,Extremely low insertion loss
+baseband_rx,bb_06_lna2,23.7,0.27,1,0,18.5,27.8,out,1,LNA_2_01,SAV-541-DG+,27.8,,
+baseband_rx,bb_07_mixer2,-6.5,6.5,1,0,14.0,23.5,out,1,MIXER_2_01,SYM-25DHW+,,30,
+baseband_rx,bb_08_bpf3,-3.0,3.0,5,0,,,out,1,FILTER_3_01,BFTC-500+,,,,
+baseband_rx,bb_09_lna3,50.0,3.5,1,0,41.0,43.0,out,1,LNA_3_01,ZHL-20W-13SWX+,43,,
+baseband_rx,bb_10_rlm43_5w,-0.04,0.04,1,0,,,out,1,,,,,
+rf_frontend,rf_00_switch,-0.3,0.3,1,0,,,out,1,SPST_SWITCH_01,MA4AGSW1,,,Disconnects the Rx during Tx
+rf_frontend,rf_01_preselector_bpf,-0.4,0.4,3,0,,,out,1,FILTER_1_01,ZVBP-K27G+,,,ultra low insertion loss
+rf_frontend,rf_02_lna1,29.0,1.8,1,0,8.5,17.5,out,1,LNA_1_01,ADL8142S,17.5,,slightly lower NF
+rf_frontend,rf_03_image_rejection_filter,-3.5,3.5,5,0,,,out,1,,,,,
+rf_frontend,rf_04_mixer1,-9.0,9.0,1,0,2.0,5.0,out,1,MIXER_1_01,HMC264LC3B,,14,
+rf_postmix_bb,post_01_bpf2,-0.6,0.6,5,0,,,out,1,FILTER_2_01,SXBP-1430+,,,Extremely low insertion loss
+rf_postmix_bb,post_02_lna2,23.7,0.27,1,0,18.5,27.8,out,1,LNA_2_01,SAV-541-DG+,27.8,,
+rf_postmix_bb,post_03_mixer2,-6.5,6.5,1,0,14.0,23.5,out,1,MIXER_2_01,SYM-25DHW+,,30,
+rf_postmix_bb,post_04_bpf3,-3.0,3.0,5,0,,,out,1,FILTER_3_01,BFTC-500+,,,,
+rf_postmix_bb,post_05_lna3,50.0,3.5,1,0,41.0,43.0,out,1,LNA_3_01,ZHL-20W-13SWX+,43,,
+rf_postmix_bb,post_06_rlm43_5w,-0.04,0.04,1,0,,,out,1,,,,,
