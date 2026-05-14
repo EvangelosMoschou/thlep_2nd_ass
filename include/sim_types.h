@@ -1,64 +1,46 @@
 #ifndef SIM_TYPES_H
 #define SIM_TYPES_H
 
-/*
- * Complex number struct (I/Q format)
- * - re: Real part (In-phase)
- * - im: Imaginary part (Quadrature)
- */
-typedef struct Complex {
+#include <stddef.h>
+#include <stdint.h>
+
+typedef struct {
     double re;
     double im;
 } Complex;
 
-/*
- * StageMetric: Measurements at each receiver stage
- * Tracks signal quality degradation through the chain
- */
-typedef struct StageMetric {
-    const char* stage;        /* Stage name (e.g., "LNA", "Mixer") */
-    const char* domain;       /* Signal domain: "complex_baseband", "rf_real", "rf_to_bb" */
-    double gain_db;           /* Stage gain in dB (NaN for derived/input metrics) */
-    double nf_db;             /* Stage noise figure in dB (NaN for derived/input metrics) */
-    int filter_len;           /* Stage moving-average length (0 if not applicable) */
-    int is_limiter;           /* Non-zero if the stage is marked as a limiter */
-    double signal_power;      /* Reference signal power (dBm-equivalent linear) */
-    double noise_power;       /* Noise power added at this stage */
-    double snr_db;            /* Signal-to-Noise Ratio in dB */
-    double evm_pct;           /* Error Vector Magnitude as percentage (I/Q error) */
+typedef struct {
+    uint32_t state;
+} PrngState;
+
+typedef struct {
+    char stage[64];
+    char domain[32];
+    double gain_db;
+    double nf_db;
+    double snr_db;
+    double evm_pct;
+    double noise_power;
+    double signal_power;
+    int filter_len;
+    int is_limiter;
 } StageMetric;
 
-/*
- * SimConfig: Top-level simulation parameters
- * Contains carrier frequency, symbol rate, SNR, antenna temperature, etc.
- */
-typedef struct SimConfig {
-    double carrier_hz;        /* RF carrier frequency (e.g., 24 GHz = 24e9) */
-    double symbol_rate_hz;    /* Symbol clock rate (e.g., 10 MHz = 10e6) */
-    int symbols;              /* Number of symbols to transmit */
-    double rolloff;           /* RRC filter roll-off factor (0..1, typically 0.2) */
-    double input_snr_db;      /* Input SNR in dB (added at antenna input) */
-    double antenna_temp_k;    /* Antenna noise temperature in Kelvin */
-    double t0_k;              /* Reference temperature (290 K standard) */
-    double rf_sample_rate_hz; /* RF sampling rate for brute-force sim (e.g., 96 GHz) */
-    unsigned int seed;        /* PRNG seed for reproducibility */
-    int run_bb;               /* Run complex baseband path (default: 0) */
-    int run_rf;               /* Run RF baseline path (default: 1) */
-    int run_realistic;        /* Run realistic impairment path (default: 1) */
+typedef struct {
+    unsigned int seed;
+    int symbols;
+    double symbol_rate_hz;
+    double rf_sample_rate_hz;
+    double carrier_hz;
+    double input_snr_db;
+    double antenna_temp_k;
+    double t0_k;
+    double rolloff;
+    int run_bb;
+    int run_rf;
+    int run_realistic;
 } SimConfig;
 
-/**
- * @brief Global toggles for realistic-path impairment modeling.
- *
- * When enabled, the corresponding impairment parameters from StageModel
- * are applied during simulation.
- */
-typedef struct RealisticPathConfig {
-    int enable_lo_phase_noise;    /**< Apply LO phase noise */
-    int enable_iq_gain_error;     /**< Apply I/Q gain mismatch */
-    int enable_iq_phase_error;    /**< Apply I/Q phase error */
-    int enable_am_pm;             /**< Apply AM-to-PM conversion */
-    int enable_butterworth;       /**< Use Butterworth filter instead of moving-average */
-} RealisticPathConfig;
+#define MAX_METRICS 64
 
 #endif

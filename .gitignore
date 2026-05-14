@@ -1,5 +1,7 @@
 # Build and object files
-bin/
+build/
+bin/*
+!bin/dual_receiver_sim
 *.o
 *.a
 *.so
