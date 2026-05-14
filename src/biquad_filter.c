@@ -1,11 +1,7 @@
 #include "biquad_filter.h"
+#include "math_utils.h"
 
-#include <math.h>
 #include <string.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 /*
  * Butterworth Q values for cascaded biquad sections.

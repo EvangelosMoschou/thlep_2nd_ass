@@ -30,14 +30,10 @@
  */
 
 #include "adc_model.h"
+#include "math_utils.h"
 #include "prng.h"
 
-#include <math.h>
 #include <stdio.h>
-
-#ifndef M_PI
-#define M_PI 3.14159265358979323846
-#endif
 
 int adc_model_init(ADCModelConfig* cfg) {
     if (!cfg) {
@@ -74,7 +70,7 @@ int adc_model_init(ADCModelConfig* cfg) {
     return 0;
 }
 
-void adc_model_apply(double* sample, double f_in_hz, const ADCModelConfig* cfg) {
+void adc_model_apply(double* sample, double f_in_hz, const ADCModelConfig* cfg, PrngState* prng) {
     if (!sample || !cfg || cfg->levels <= 0.0) {
         return;
     }
@@ -93,7 +89,7 @@ void adc_model_apply(double* sample, double f_in_hz, const ADCModelConfig* cfg) 
     double amplitude = cfg->full_scale_vpp * 0.5;
     double sigma_v = 2.0 * M_PI * f_in_hz * amplitude * cfg->jitter_s;
 
-    *sample += prng_gauss() * sigma_v;
+    *sample += prng_gauss(prng) * sigma_v;
 }
 
 void adc_model_free(ADCModelConfig* cfg) {
