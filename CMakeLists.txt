@@ -24,6 +24,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
 set(SOURCES
     src/main.c
     src/prng.c
+    src/propagation.c
     src/stage_models.c
     src/stage_artifacts.c
     src/phase_noise.c
@@ -31,6 +32,12 @@ set(SOURCES
     src/iq_imbalance.c
     src/flicker_noise.c
     src/biquad_filter.c
+    src/constellation.c
+    src/metrics.c
+    src/cli_args.c
+    src/output_mgr.c
+    src/signal_chain.c
+    src/sim_baseband.c
 )
 
 # ── Target ────────────────────────────────────────────────────────────────────
