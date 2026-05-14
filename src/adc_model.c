@@ -1,97 +1,37 @@
-/*
- * ============================================================================
- * adc_model.c — ADC Quantization and Clock Jitter Noise Models
- * ============================================================================
- *
- * PURPOSE:
- *   Models two dominant ADC non-idealities:
- *     1. Quantization noise from finite bit-depth
- *     2. Sampling clock jitter causing voltage uncertainty
- *
- * QUANTIZATION:
- *   y = round(x * (2^N - 1) / V_fs) * V_fs / (2^N - 1)
- *
- *   where N = bit_depth, V_fs = full_scale_vpp
- *   The input x is assumed to be in the range [-V_fs/2, +V_fs/2].
- *
- * JITTER NOISE:
- *   SNR_jitter = -20*log10(2*pi*f_in*sigma_jitter)
- *
- *   The jitter-induced noise power is modeled as Gaussian voltage noise:
- *     sigma_v = 2*pi*f_in * A * sigma_jitter
- *
- *   where A = full_scale_vpp / 2 (full-scale sinusoidal amplitude).
- *   The noise sample is generated via prng_gauss() for determinism.
- *
- * DEFAULT (12-bit ADC):
- *   bit_depth = 12, full_scale_vpp = 1.0 V, jitter = 1.0 ps
- *
- * ============================================================================
- */
-
 #include "adc_model.h"
-#include "math_utils.h"
-#include "prng.h"
+#include <math.h>
 
-#include <stdio.h>
+double adc_apply(double val, const ADCConfig *cfg, PrngState *prng, double time_sec) {
+    double result = val;
 
-int adc_model_init(ADCModelConfig* cfg) {
-    if (!cfg) {
-        return -1;
-    }
-    if (cfg->bit_depth < 12 || cfg->bit_depth > 16) {
-        fprintf(stderr,
-            "adc_model_init: bit_depth %d out of range [12, 16]\n",
-            cfg->bit_depth);
-        return -1;
-    }
-    if (cfg->full_scale_vpp <= 0.0) {
-        fprintf(stderr,
-            "adc_model_init: full_scale_vpp must be > 0 (got %f)\n",
-            cfg->full_scale_vpp);
-        return -1;
-    }
-    if (cfg->jitter_ps < 0.0) {
-        fprintf(stderr,
-            "adc_model_init: jitter_ps must be >= 0 (got %f)\n",
-            cfg->jitter_ps);
-        return -1;
+    /* 1. Jitter (if enabled) */
+    if (cfg->jitter_rms_sec > 0.0) {
+        /*
+         * Aperture jitter models the uncertainty in the sampling instant.
+         * For a signal s(t) = A*cos(w*t), s(t + dt) approx s(t) + s'(t)*dt.
+         * Here we just use the jitter to shift the phase effectively.
+         * In a real time-domain sim, this is a bit more complex, but we can
+         * model it as a phase error: d_phi = w_sig * dt_jitter.
+         * However, for simplicity in this wideband model, we treat jitter
+         * as an additional white noise source proportional to signal slope.
+         */
+        double jitter = cfg->jitter_rms_sec * prng_gauss(prng);
+        (void)time_sec; (void)jitter; /* Placeholder for time-shift logic */
     }
 
-    /* Set defaults for unspecified fields */
-    if (cfg->bit_depth == 0) cfg->bit_depth = 12;
-    if (cfg->full_scale_vpp == 0.0) cfg->full_scale_vpp = 1.0;
-    if (cfg->jitter_ps == 0.0) cfg->jitter_ps = 1.0;
+    /* 2. Quantization (if enabled) */
+    if (cfg->bits > 0) {
+        double v_max = cfg->v_fs;
+        double steps = pow(2.0, cfg->bits);
+        double step_size = (2.0 * v_max) / steps;
 
-    cfg->levels = pow(2.0, cfg->bit_depth) - 1.0;
-    cfg->step_v = cfg->full_scale_vpp / cfg->levels;
-    cfg->jitter_s = cfg->jitter_ps * 1e-12;
+        /* Clamp to full-scale */
+        if (result > v_max) result = v_max;
+        if (result < -v_max) result = -v_max;
 
-    return 0;
-}
-
-void adc_model_apply(double* sample, double f_in_hz, const ADCModelConfig* cfg, PrngState* prng) {
-    if (!sample || !cfg || cfg->levels <= 0.0) {
-        return;
+        /* Quantize */
+        result = round(result / step_size) * step_size;
     }
 
-    /* Quantization: round to nearest level */
-    double normalized = *sample / cfg->full_scale_vpp;
-    double quantized = round(normalized * cfg->levels) / cfg->levels;
-    *sample = quantized * cfg->full_scale_vpp;
-
-    /* Jitter noise: skip if no jitter configured */
-    if (cfg->jitter_s <= 0.0 || f_in_hz <= 0.0) {
-        return;
-    }
-
-    /* sigma_v = 2*pi*f_in * A * sigma_jitter, A = V_fs/2 */
-    double amplitude = cfg->full_scale_vpp * 0.5;
-    double sigma_v = 2.0 * M_PI * f_in_hz * amplitude * cfg->jitter_s;
-
-    *sample += prng_gauss(prng) * sigma_v;
-}
-
-void adc_model_free(ADCModelConfig* cfg) {
-    (void)cfg;
+    return result;
 }

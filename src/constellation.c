@@ -1,96 +1,55 @@
-/*
- * constellation.c — DVB-S2X 64-APSK constellation generation
- *
- * Implements the DVB-S2X 64-APSK constellation with 4 concentric rings:
- *    Ring 0:  4 points at radius  1.00
- *    Ring 1: 12 points at radius  2.73
- *    Ring 2: 20 points at radius  4.52
- *    Ring 3: 28 points at radius  6.15
- *
- * Points within each ring are evenly distributed. The whole set is then
- * normalised to unit average symbol energy (Es = 1).
- */
-
-#include <stddef.h>
-
-#include "math_utils.h"
-#include "sim_types.h"
 #include "constellation.h"
-
-/* ------------------------------------------------------------------ */
-/*  Normalise constellation to unit average power                     */
-/* ------------------------------------------------------------------ */
-
-/*
- * Normalise all constellation points so their mean squared magnitude
- * (average symbol energy) equals exactly 1.0.
- *
- *   c — Array of m complex points (modified in-place)
- *   m — Number of points
- *
- * Returns 0 on success, -1 if c is NULL or m <= 0, -2 if all points are zero.
- */
-static int normalize_constellation(Complex *c, int m) {
-  double p = 0.0;
-  int i;
-
-  if (!c || m <= 0) {
-    return -1;
-  }
-
-  /* Sum of squared magnitudes */
-  for (i = 0; i < m; ++i) {
-    p += c[i].re * c[i].re + c[i].im * c[i].im;
-  }
-  p /= (double)m;
-
-  if (p <= 0.0) {
-    return -2;       /* degenerate — physically meaningless */
-  }
-
-  { /* Scale each point by 1/sqrt(mean power) */
-    const double s = 1.0 / sqrt(p);
-    for (i = 0; i < m; ++i) {
-      c[i].re *= s;
-      c[i].im *= s;
-    }
-  }
-
-  return 0;
-}
-
-/* ------------------------------------------------------------------ */
-/*  Build the DVB-S2X 64-APSK constellation                           */
-/* ------------------------------------------------------------------ */
+#include <math.h>
 
 int build_dvbs2_64apsk_constellation(Complex *table, size_t count) {
-  if (!table)
-    return -1;
-  if (count < 64)
-    return -2;
+    if (!table) return -1;
+    if (count < 64) return -2;
 
-  /*
-   * DVB-S2 64-APSK: 4 rings of 4, 12, 20, 28 points.
-   * Ring radii from the DVB-S2X standard (pre-normalisation).
-   */
-  const int    n_points[4]    = { 4, 12, 20, 28 };
-  const double ring_radii[4]  = { 1.0, 2.73, 4.52, 6.15 };
+    const double R1 = 1.0;
+    const double R2 = 2.73;
+    const double R3 = 4.52;
+    const double R4 = 6.15;
 
-  int idx = 0;
-  for (int i = 0; i < 4; ++i) {
-    const int    N      = n_points[i];
-    const double radius = ring_radii[i];
-    for (int k = 0; k < N; ++k) {
-      const double phase = (double)k * (2.0 * M_PI / N) + (M_PI / N);
-      table[idx].re = radius * cos(phase);
-      table[idx].im = radius * sin(phase);
-      ++idx;
+    int idx = 0;
+    /* Ring 1: 4 points */
+    for (int i = 0; i < 4; i++) {
+        double phi = M_PI/4.0 + i*M_PI/2.0;
+        table[idx].re = R1 * cos(phi);
+        table[idx].im = R1 * sin(phi);
+        idx++;
     }
-  }
+    /* Ring 2: 12 points */
+    for (int i = 0; i < 12; i++) {
+        double phi = M_PI/12.0 + i*M_PI/6.0;
+        table[idx].re = R2 * cos(phi);
+        table[idx].im = R2 * sin(phi);
+        idx++;
+    }
+    /* Ring 3: 20 points */
+    for (int i = 0; i < 20; i++) {
+        double phi = M_PI/20.0 + i*M_PI/10.0;
+        table[idx].re = R3 * cos(phi);
+        table[idx].im = R3 * sin(phi);
+        idx++;
+    }
+    /* Ring 4: 28 points */
+    for (int i = 0; i < 28; i++) {
+        double phi = M_PI/28.0 + i*M_PI/14.0;
+        table[idx].re = R4 * cos(phi);
+        table[idx].im = R4 * sin(phi);
+        idx++;
+    }
 
-  const int ret = normalize_constellation(table, 64);
-  if (ret != 0)
-    return -3;       /* normalisation failed */
+    /* Normalize Es = 1 */
+    double total_energy = 0;
+    for (int i = 0; i < 64; i++) {
+        total_energy += table[i].re*table[i].re + table[i].im*table[i].im;
+    }
+    double scale = sqrt(64.0 / total_energy);
+    for (int i = 0; i < 64; i++) {
+        table[i].re *= scale;
+        table[i].im *= scale;
+    }
 
-  return 0;
+    return 0;
 }

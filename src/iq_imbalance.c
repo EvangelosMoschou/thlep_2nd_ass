@@ -1,28 +1,19 @@
 #include "iq_imbalance.h"
-#include "math_utils.h"
+#include <math.h>
 
 void iq_imbalance_apply(Complex *s, const IQImbalanceConfig *cfg) {
-    if (!s || !cfg) return;
-
-    double gain_lin = db_to_lin_amplitude(-cfg->gain_error_db);
-    double phase_rad = cfg->phase_error_deg * M_PI / 180.0;
-    double cos_p = cos(phase_rad);
-    double sin_p = sin(phase_rad);
-
-    double q_out = s->im * gain_lin * cos_p - s->re * sin_p;
-
-    s->im = q_out;
+    double g_error_lin = pow(10.0, -cfg->gain_error_db / 20.0);
+    double phi_rad = cfg->phase_error_deg * M_PI / 180.0;
+    
+    double i = s->re;
+    double q = s->im;
+    
+    s->im = q * g_error_lin * cos(phi_rad) - i * sin(phi_rad);
 }
 
 void iq_imbalance_apply_real(double *i, double *q, const IQImbalanceConfig *cfg) {
-    if (!i || !q || !cfg) return;
-
-    double gain_lin = db_to_lin_amplitude(-cfg->gain_error_db);
-    double phase_rad = cfg->phase_error_deg * M_PI / 180.0;
-    double cos_p = cos(phase_rad);
-    double sin_p = sin(phase_rad);
-
-    double q_out = (*q) * gain_lin * cos_p - (*i) * sin_p;
-
-    *q = q_out;
+    double g_error_lin = pow(10.0, -cfg->gain_error_db / 20.0);
+    double phi_rad = cfg->phase_error_deg * M_PI / 180.0;
+    
+    *q = (*q) * g_error_lin * cos(phi_rad) - (*i) * sin(phi_rad);
 }
