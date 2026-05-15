@@ -475,8 +475,52 @@ void print_link_budget(const LinkBudgetResult *b) {
         printf("  LINK MARGIN                             %13.2f  dB   ✓\n",
                b->link_margin_db);
     } else {
-        printf("  LINK MARGIN                             %13.2f  dB   ✗ (INSUFFICIENT)\n",
-               b->link_margin_db);
+    printf("  LINK MARGIN                             %13.2f  dB   ✗ (INSUFFICIENT)\n",
+           b->link_margin_db);
     }
+    printf("================================================================================\n");
+}
+
+void print_modcod_table(double snr_db) {
+    /* MODCOD thresholds from the assignment table */
+    static const struct {
+        const char *modulation;
+        double snr_req_db;
+    } modcods[] = {
+        {"BPSK",   10.5},
+        {"QPSK",   13.5},
+        {"8PSK",   18.8},
+        {"16-APSK", 20.5},
+        {"32-APSK", 23.5},
+        {"64-APSK", 26.5},
+        {"128-QAM", 29.5},
+        {"256-QAM", 32.5},
+        {"512-QAM", 35.5},
+        {"1024-QAM", 38.7},
+    };
+    int i;
+    int n = sizeof(modcods) / sizeof(modcods[0]);
+    double best_snr = -INFINITY;
+    const char *best_mod = "—";
+
+    printf("\n");
+    printf("  --- Adaptive Coding & Modulation (ACM) ---\n");
+    printf("  Current SNR at receiver: %.2f dB\n", snr_db);
+    printf("\n  %-14s  %8s  %10s\n", "Modulation", "Req SNR", "Supported?");
+    printf("  %-14s  %8s  %10s\n", "--------------", "--------", "----------");
+    for (i = 0; i < n; i++) {
+        int ok = (snr_db >= modcods[i].snr_req_db);
+        printf("  %-14s  %6.1f dB  %10s\n",
+               modcods[i].modulation,
+               modcods[i].snr_req_db,
+               ok ? "✅" : "✗");
+        if (ok && modcods[i].snr_req_db > best_snr) {
+            best_snr = modcods[i].snr_req_db;
+            best_mod = modcods[i].modulation;
+        }
+    }
+    printf("  ───────────────────────────────────────────────────\n");
+    printf("  Best achievable:  %s  (needs %.1f dB, have %.2f dB)\n",
+           best_mod, best_snr, snr_db);
     printf("================================================================================\n");
 }

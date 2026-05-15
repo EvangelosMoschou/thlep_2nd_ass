@@ -2353,7 +2353,7 @@ int main(int argc, char **argv) {
   cfg.rolloff = 0.0;           /* Rectangular pulses (fastest) */
   cfg.input_snr_db = 20.0;     /* 20 dB input SNR based on assignment */
   cfg.antenna_temp_k =
-      150.0;        /* 150 K antenna temperature (typical satellite) */
+      93.0;         /* 93 K antenna noise temp @ 30° elev (ASC Signal 8.1m) */
   cfg.t0_k = 290.0; /* 290 K reference temperature (room temp) */
   cfg.rf_sample_rate_hz = 96.0e9;      /* 96 GHz RF sampling */
   cfg.seed = (unsigned int)time(NULL); /* Default seed: current time */
@@ -2558,7 +2558,7 @@ int main(int argc, char **argv) {
     CascadeResult    cascade_result;
     int              cascade_ret;
 
-    cascade_params.antenna_temp_k = cfg.antenna_temp_k;     /* 150 K */
+    cascade_params.antenna_temp_k = cfg.antenna_temp_k;     /* 93 K (ASC Signal 8.1m) */
     cascade_params.t0_k           = cfg.t0_k;               /* 290 K */
     cascade_params.bw_hz          = B_NOISE_HZ;             /* 200 MHz */
     cascade_params.vpp_out        = 1.0;                    /* 1 Vpp */
@@ -2604,12 +2604,23 @@ int main(int argc, char **argv) {
     prop_scenario.surface_pressure_hpa = 1013.25;
     prop_scenario.water_vapor_gm3      = 7.5;
     prop_scenario.liquid_water_gm3     = 0.05;                /* medium fog */
-    prop_scenario.eirp_dbm             = 85.0;
-    prop_scenario.rx_gain_dbi          = 40.0;
+    prop_scenario.eirp_dbm             = 85.0;                 /* 32 W + 40 dBi (Beyond Gravity 0.6m sat antenna) */
+    prop_scenario.rx_gain_dbi          = 62.0;                 /* ASC Signal 8.1m earth station @ 24 GHz */
     prop_scenario.rx_sensitivity_dbm   = sensitivity_dbm;     /* from cascade above */
 
     compute_link_budget(&prop_scenario, &prop_budget);
     print_link_budget(&prop_budget);
+
+    /* Actual SNR at receiver:
+     *   Ni = k · T_ant · B  (noise floor at antenna temperature)
+     *   SNR at detector = P_rx − (Ni + NF_total) */
+    {
+        double ni_dbm = K_BOLTZMANN * cfg.antenna_temp_k * B_NOISE_HZ;
+        ni_dbm = lin_to_db(ni_dbm) + 30.0;
+        double snr_at_detector = prop_budget.rx_power_dbm
+                               - (ni_dbm + tmp_result.total_nf_db);
+        print_modcod_table(snr_at_detector);
+    }
   }
 
   /* --- Run Simulation Paths --- */

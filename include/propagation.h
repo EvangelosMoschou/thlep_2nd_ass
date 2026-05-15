@@ -251,4 +251,14 @@ void compute_link_budget(const PropagationScenario *scenario,
  */
 void print_link_budget(const LinkBudgetResult *budget);
 
+/**
+ * @brief Print the Adaptive Coding & Modulation (ACM) table.
+ *
+ * Given the current SNR at the receiver input, shows which DVB-S2X
+ * MODCODs are supported.  Thresholds are from the assignment table.
+ *
+ * @param snr_at_receiver_db  Actual SNR at receiver input [dB]
+ */
+void print_modcod_table(double snr_at_receiver_db);
+
 #endif /* PROPAGATION_H */
