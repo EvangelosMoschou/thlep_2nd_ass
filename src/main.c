@@ -1368,21 +1368,10 @@ static int simulate_bruteforce_rf(
      * symbols.
      */
 
-    /* Special handling for LNA 3 (Variable Gain to hit 1Vpp, matching MATLAB)
+    /* LNA 3 VGA disabled — cascade analysis already provides correct total gain.
+     * The previous auto-gain used normalized (1Ω) signal values but targeted
+     * 1.0 Vpp in 50Ω terms, causing +20 dB over-amplification (~13 Vpp traces).
      */
-    if (strstr(stage.name, "LNA 3") || strstr(stage.name, "lna3") ||
-        strstr(stage.name, "post_05")) {
-      double p_mean = mean_power_soa(bb_sig_re, bb_sig_im, nbb);
-      double v_rms = sqrt(p_mean);
-      double v_pp_est = v_rms * 2.0 * sqrt(2.0);
-      double target_vpp = 1.0;
-      if (v_pp_est > 1e-9) {
-        double g_extra_db = 20.0 * log10(target_vpp / v_pp_est);
-        if (g_extra_db < -20.0) g_extra_db = -20.0;
-        if (g_extra_db > 20.0) g_extra_db = 20.0;
-        stage.gain_db += g_extra_db;
-      }
-    }
 
     apply_stage_soa(&stage, bb_ref_re, bb_ref_im, bb_sig_re, bb_sig_im, nbb,
                     "rf_to_bb", N_t0_W, &N_current, &Gain_total, P_sig_in_W);
@@ -1900,19 +1889,7 @@ static int simulate_realistic_rf(
   for (i = 0u; i < bb_stage_count; ++i) {
     StageModel stage = bb_stages[i];
 
-    if (strstr(stage.name, "LNA 3") || strstr(stage.name, "lna3") ||
-        strstr(stage.name, "post_05")) {
-      double p_mean = mean_power_soa(bb_sig_re, bb_sig_im, nbb);
-      double v_rms = sqrt(p_mean);
-      double v_pp_est = v_rms * 2.0 * sqrt(2.0);
-      double target_vpp = 1.0;
-      if (v_pp_est > 1e-9) {
-        double g_extra_db = 20.0 * log10(target_vpp / v_pp_est);
-        if (g_extra_db < -20.0) g_extra_db = -20.0;
-        if (g_extra_db > 20.0) g_extra_db = 20.0;
-        stage.gain_db += g_extra_db;
-      }
-    }
+    /* LNA 3 VGA disabled — same impedance mismatch bug as baseband path above */
 
     /* Apply biquad filter if filter_type == 1 (Butterworth) */
     if (stage.filter_type == 1) {
@@ -2352,8 +2329,8 @@ int main(int argc, char **argv) {
   cfg.symbols = 3000;          /* 3000 symbols - reasonable run time */
   cfg.rolloff = 0.0;           /* Rectangular pulses (fastest) */
   cfg.input_snr_db = 20.0;     /* 20 dB input SNR based on assignment */
-  cfg.antenna_temp_k =
-      93.0;         /* 93 K antenna noise temp @ 30° elev (ASC Signal 8.1m) */
+    cfg.antenna_temp_k =
+        91.0;         /* 91 K antenna noise temp @ 44° elev (Viasat 13.5m, Athens→SES-17) */
   cfg.t0_k = 290.0; /* 290 K reference temperature (room temp) */
   cfg.rf_sample_rate_hz = 96.0e9;      /* 96 GHz RF sampling */
   cfg.seed = (unsigned int)time(NULL); /* Default seed: current time */
@@ -2497,23 +2474,12 @@ int main(int argc, char **argv) {
 
   generate_symbols(constellation, 64, tx_symbols, labels, (size_t)cfg.symbols);
 
-  /* --- Calculate the link budget --- */
-  /*
-   * MATLAB reference uses a fixed 200 MHz receiver noise bandwidth and
-   * a 50 uV RMS input level. We keep the same physical assumption here so
-   * the RF chain starts from the same absolute signal scale.
-   */
+  /* --- Noise floor calculation (used later for input SNR) --- */
   noise_bw_hz = 200.0e6;
   noise_w = K_BOLTZMANN * cfg.antenna_temp_k * noise_bw_hz;
   noise_dbm = lin_to_db(noise_w) + 30.0;
-  {
-    const double r_load_ohm = 50.0;
-    const double input_target_vrms = 50.0e-6;
-    const double signal_w =
-        (input_target_vrms * input_target_vrms) / r_load_ohm;
-    signal_dbm = lin_to_db(signal_w) + 30.0;
-    cfg.input_snr_db = signal_dbm - noise_dbm;
-  }
+  /* Default input SNR — overridden after link budget computation */
+  cfg.input_snr_db = 20.0;
 
   /* --- Load receiver stage configuration from CSV --- */
   if (stage_models_load_csv(resolved_stage_csv_path, &stage_cfg, stage_err,
@@ -2597,7 +2563,7 @@ int main(int argc, char **argv) {
 
     prop_scenario.frequency_hz         = cfg.carrier_hz;
     prop_scenario.distance_km          = 36000.0;
-    prop_scenario.elevation_deg        = 30.0;
+    prop_scenario.elevation_deg        = 44.0;                /* Athens → SES-17 (18°E) */
     prop_scenario.polarization_deg     = 45.0;                /* circular, TBD with team */
     prop_scenario.rain_rate_mmh        = 10.0;                /* 0.01% exceedance, generic */
     prop_scenario.surface_temp_k       = 288.15;
@@ -2605,11 +2571,15 @@ int main(int argc, char **argv) {
     prop_scenario.water_vapor_gm3      = 7.5;
     prop_scenario.liquid_water_gm3     = 0.05;                /* medium fog */
     prop_scenario.eirp_dbm             = 85.0;                 /* 32 W + 40 dBi (Beyond Gravity 0.6m sat antenna) */
-    prop_scenario.rx_gain_dbi          = 62.0;                 /* ASC Signal 8.1m earth station @ 24 GHz */
+    prop_scenario.rx_gain_dbi          = 68.70;                /* Viasat 13.5m earth station @ 24 GHz: 67.2+20·log10(24/20.2) */
     prop_scenario.rx_sensitivity_dbm   = sensitivity_dbm;     /* from cascade above */
 
     compute_link_budget(&prop_scenario, &prop_budget);
     print_link_budget(&prop_budget);
+
+    /* Override simulation input SNR with real link budget received power */
+    signal_dbm = prop_budget.rx_power_dbm;
+    cfg.input_snr_db = signal_dbm - noise_dbm;
 
     /* Actual SNR at receiver:
      *   Ni = k · T_ant · B  (noise floor at antenna temperature)
@@ -2620,7 +2590,7 @@ int main(int argc, char **argv) {
         double snr_at_detector = prop_budget.rx_power_dbm
                                - (ni_dbm + tmp_result.total_nf_db);
         print_modcod_table(snr_at_detector);
-    }
+     }
   }
 
   /* --- Run Simulation Paths --- */

@@ -31,3 +31,8 @@ venv/
 src/clean_main.c
 src/part1.c
 matlab_output.txt
+
+# API keys (local override)
+scripts/component_config_local.py
+data_input/component_cache/
+.gitnexus

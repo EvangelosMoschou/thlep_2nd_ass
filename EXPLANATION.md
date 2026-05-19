@@ -179,27 +179,86 @@ main()
 
 ## 5. Μέρος Δ — Propagation Analysis
 
-Υλοποιεί 5 μοντέλα διάδοσης:
+Υλοποιεί 5 μοντέλα διάδοσης με τις εξής θεωρητικές σχέσεις και παραμέτρους:
 
-1. **FSPL**: `92.45 + 20·log₁₀(f_GHz) + 20·log₁₀(d_km)` dB
-2. **Rain (ITU-R P.838-3)**: γ_R = k·R^α με curve-fit 4/5-όρων από Tables 1-4
-3. **Fog (ITU-R P.840-9)**: Double-Debye μοντέλο διηλεκτρικής σταθεράς νερού
-4. **Gas (ITU-R P.676-13)**: Reference values + pressure/temperature scaling
-5. **Link margin**: EIRP − Σαπώλειες + G_rx − sensitivity
+### 5.1 Ελεύθερος Χώρος (Free-Space Path Loss - FSPL)
+$$FSPL = \left(\frac{4\pi d f}{c}\right)^2$$
+Σε λογαριθμική κλίμακα (dB):
+$$\text{FSPL (dB)} = 92.45 + 20\log_{10}(f_{\text{GHz}}) + 20\log_{10}(d_{\text{km}})$$
+* **Συχνότητα ($f$):** $24.0 \text{ GHz}$ (K-band).
+* **Απόσταση ($d$ - `distance_km`):** $36000.0 \text{ km}$ (GEO τροχιά).
 
-Default σενάριο: GEO (36.000 km), 30° elevation, 10 mm/h rain rate.
+### 5.2 Εξασθένηση Βροχής (Rain Attenuation - ITU-R P.838-3)
+Η ειδική εξασθένηση βροχής $\gamma_R$ [dB/km] υπολογίζεται από τη σχέση:
+$$\gamma_R = k \cdot R^\alpha$$
+Η συνολική εξασθένηση στη λοξή διαδρομή (slant path) είναι:
+$$A_{\text{rain}} = \gamma_R \cdot \frac{h_R}{\sin(\theta)}$$
+* **Ρυθμός Βροχής ($R$ - `rain_rate_mmh`):** **$10.0\text{ mm/h}$** (Generic 0.01% exceedance). *(Στο MATLAB χρησιμοποιείται $45.0\text{ mm/h}$ για heavy rain).*
+* **Γωνία Ανύψωσης ($\theta$ - `elevation_deg`):** **$44.0^\circ$** στο `main.c` (ζεύξη Αθήνα $\to$ SES-17) ή $30.0^\circ$ στο generic σενάριο.
+* **Ύψος Βροχής ($h_R$):** Σταθερό στα **$4.0\text{ km}$** (ITU-R P.839).
+* **Συντελεστές $k, \alpha$:** Υπολογίζονται από curve-fits 4 και 5 όρων με βάση το standard για κυκλική πόλωση ($\tau = 45^\circ$).
+
+### 5.3 Εξασθένηση Νεφών/Ομίχλης (Fog/Cloud Attenuation - ITU-R P.840-9)
+Η ειδική εξασθένηση $\gamma_c$ [dB/km] ορίζεται ως:
+$$\gamma_c = K_l \cdot M$$
+$$A_{\text{fog}} = \frac{\gamma_c}{\sin(\theta)}$$
+* **Πυκνότητα Υγρού Νερού ($M$ - `liquid_water_gm3`):** **$0.05\text{ g/m}^3$** (μέτρια ομίχλη / 300 m ορατότητα).
+* **Θερμοκρασία ($T$ - `surface_temp_k`):** **$288.15\text{ K}$** ($15^\circ\text{C}$ standard surface temperature). Εισέρχεται στο μοντέλο double-Debye για τον υπολογισμό της διηλεκτρικής σταθεράς του νερού $\epsilon'(f), \epsilon''(f)$, από την οποία προκύπτει ο συντελεστής $K_l$ [(dB/km)/(g/m³)].
+
+### 5.4 Εξασθένηση Ατμοσφαιρικών Αερίων (ITU-R P.676-13)
+$$\gamma_o = \gamma_{o,\text{ref}} \cdot \left(\frac{P}{1013.25}\right)^2 \cdot \left(\frac{288.15}{T}\right)^3 \quad \text{[dB/km]}$$
+$$\gamma_w = \gamma_{w,\text{ref}} \cdot \left(\frac{\rho}{7.5}\right) \cdot \left(\frac{288.15}{T}\right)^{1.5} \quad \text{[dB/km]}$$
+$$A_{\text{gas}} = \frac{\gamma_o \cdot h_o + \gamma_w \cdot h_w}{\sin(\theta)}$$
+* **Πίεση Επιφάνειας ($P$ - `surface_pressure_hpa`):** **$1013.25\text{ hPa}$** (Sea level standard).
+* **Πυκνότητα Υδρατμών ($\rho$ - `water_vapor_gm3`):** **$7.5\text{ g/m}^3$** (Reference).
+* **Ισοδύναμα Ύψη ($h_o, h_w$):** $h_o = 6.0\text{ km}$ (οξυγόνο), $h_w = 2.0\text{ km}$ (υδρατμοί) στα 24 GHz.
+* **Τιμές Αναφοράς:** $\gamma_{o,\text{ref}} = 0.0080\text{ dB/km}$, $\gamma_{w,\text{ref}} = 0.0850\text{ dB/km}$.
+
+### 5.5 Κέρδος Κεραίας και Link Budget
+$$P_{\text{rx}} = \text{EIRP} - A_{\text{total}} + G_{\text{rx}} \quad \text{[dBm]}$$
+$$\text{Margin} = P_{\text{rx}} - \text{Sensitivity} \quad \text{[dB]}$$
+* **EIRP:** $85.0\text{ dBm}$.
+* **Κέρδος Κεραίας Λήψης ($G_{\text{rx}}$ - `rx_gain_dbi`):**
+  * **$68.70\text{ dBi}$** στο `main.c` (Viasat 13.5m).
+  * **$62.0\text{ dBi}$** (ASC Signal 8.1m με απόδοση $\eta \approx 55\%$).
+    * *Υπολογισμός Κέρδους & Απόδοσης:*
+      $$G_{\text{max}} = 10\log_{10}\left(\left(\frac{\pi D}{\lambda}\right)^2\right) = 66.2\text{ dBi} \quad (\text{για } D=8.1\text{m}, \lambda=0.0125\text{m})$$
+      Με απόδοση διαφράγματος $\eta \approx 55\%$:
+      $$G_{\text{eff}} = 66.2 + 10\log_{10}(0.55) = 63.6\text{ dBi}$$
+      Αφαιρώντας $\sim 1.5\text{ dB}$ απώλειες εκτός ζώνης (spillover, matching): $G_{\text{rx}} = 62.0\text{ dBi}$.
+
+---
 
 ## 6. Μέρος Ε — Cascade Analysis
 
-Υπολογίζει:
+Υπολογίζει τα χαρακτηριστικά της RF αλυσίδας του δέκτη:
 
-- **Friis NF**: F_total = F₁ + (F₂−1)/G₁ + (F₃−1)/(G₁·G₂) + …
-- **IIP3 cascade**: 1/IIP3 = 1/IIP3₁ + G₁/IIP3₂ + G₁·G₂/IIP3₃ + …
-- **Dynamic range**: LDR, SFDR, noise floor
-- **Sensitivity**: kT₀B + NF_total + SNR_required
+### 6.1 Friis Noise Cascade (Θόρυβος)
+$$F_{\text{total}} = F_1 + \frac{F_2 - 1}{G_1} + \frac{F_3 - 1}{G_1 G_2} + \dots + \frac{F_n - 1}{\prod_{i=1}^{n-1} G_i}$$
+$$\text{NF}_{\text{total}} = 10\log_{10}(F_{\text{total}}) \quad \text{[dB]}$$
+*(όπου $F_i = 10^{\text{NF}_i/10}$ και $G_i = 10^{\text{Gain}_i/10}$ σε γραμμική κλίμακα).*
+
+### 6.2 IIP3 Cascade (Μη-γραμμικότητα)
+$$\frac{1}{\text{IIP3}_{\text{total}}} = \frac{1}{\text{IIP3}_1} + \frac{G_1}{\text{IIP3}_2} + \frac{G_1 G_2}{\text{IIP3}_3} + \dots + \frac{\prod_{i=1}^{n-1} G_i}{\text{IIP3}_n}$$
+*(όπου όλες οι τιμές ισχύος και κέρδους είναι σε γραμμική κλίμακα Watts και ratio. Αν δίνεται OIP3, μετατρέπεται σε $\text{IIP3} = \text{OIP3}/G$).*
+
+### 6.3 Receiver Sensitivity (Ευαισθησία)
+$$\text{Sensitivity (dBm)} = \text{kTB (dBm)} + \text{NF}_{\text{total}} + \text{SNR}_{\text{required}}$$
+$$\text{kTB (dBm)} = 10\log_{10}(k \cdot T_0 \cdot B \cdot 1000) \approx -90.96 \text{ dBm}$$
+* **Θερμοκρασία Αναφοράς ($T_0$):** $290.0\text{ K}$.
+* **Εύρος Ζώνης Θορύβου ($B$):** $200.0\text{ MHz}$.
+* **Απαιτούμενο SNR (DVB-S2X 64-APSK):** **$26.5\text{ dB}$**.
+* **Υπολογισμένη Ευαισθησία:** **$-61.88\text{ dBm}$** (για $\text{NF}_{\text{total}} = 2.58\text{ dB}$).
+
+### 6.4 Δυναμικό Εύρος (Dynamic Range)
+* **Linear Dynamic Range (LDR):**
+  $$\text{LDR} = P_{\text{1dB,out}} - N_0 \quad \text{[dB]}$$
+* **Spurious-Free Dynamic Range (SFDR):**
+  $$\text{SFDR} = \frac{2}{3} ( \text{OIP3}_{\text{total}} - N_0 ) \quad \text{[dB]}$$
+  *(όπου $N_0$ είναι η ισχύς θορύβου εξόδου: $N_0 = k T_{\text{ant}} B G_{\text{total}} + \text{εσωτερικός θόρυβος} \approx -10.37\text{ dBm}$).*
 
 Οι τιμές IIP3 και P1dB προέρχονται από τα **datasheets** μέσω του
-component_catalog module (LNA1 ADL8142S: OIP3=17.5 dBm, LNA2 SAV-541-DG+:
+`component_catalog` module (LNA1 ADL8142S: OIP3=17.5 dBm, LNA2 SAV-541-DG+:
 OIP3=27.8 dBm, Mixer1 HMC264LC3B: IIP3=14 dBm, κ.λπ.)
 
 ## 7. Δομή receiver_config.csv
