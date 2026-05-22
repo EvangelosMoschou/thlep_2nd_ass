@@ -79,4 +79,41 @@ int simulate_baseband(const SimConfig *cfg,
                       const char *const_dir,
                       const char *trace_dir);
 
+/**
+ * @brief Run the transmitter chain simulation.
+ *
+ * Processes @p nsym complex I/Q symbols through the transmitter stage chain
+ * loaded from transmitter.csv.  Uses the same linear stage model (gain, NF,
+ * filtering) as the baseband path.
+ *
+ * Output directory layout:
+ *   out/tx/constellations/transmitter_input.svg
+ *   out/tx/constellations/transmitter_stage_01.svg
+ *   ...
+ *
+ * @param cfg                Simulation configuration.
+ * @param tx_stage_cfg       Transmitter stage config loaded from transmitter.csv.
+ * @param constellation_template  The 64-point constellation template.
+ * @param constellation_count     Number of constellation points (typically 64).
+ * @param tx_symbols         Transmitted complex symbols.
+ * @param nsym               Number of symbols.
+ * @param rng                Reentrant PRNG state.
+ * @param const_dir          Directory for constellation SVG output (NULL to skip).
+ *
+ * @return  0   on success.
+ * @return -1   on memory allocation failure.
+ * @return -2   if the transmitter chain is missing or empty.
+ */
+int simulate_transmitter(const SimConfig *cfg,
+                         const StageModelsConfig *tx_stage_cfg,
+                         const Complex *constellation_template,
+                         size_t constellation_count,
+                         const Complex *tx_symbols,
+                         size_t nsym,
+                         PrngState *rng,
+                         const char *csv_dir,
+                         const char *const_dir,
+                         const char *trace_dir,
+                         const char *spectrum_dir);
+
 #endif /* SIM_BASEBAND_H */

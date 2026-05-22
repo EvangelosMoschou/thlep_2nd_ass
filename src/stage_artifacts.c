@@ -875,15 +875,15 @@ static int write_constellation_svg(
     double scaled_h;     /* Actual plot height in pixels after uniform scaling */
     double x_origin;     /* Pixel X position of data xmin */
     double y_origin;     /* Pixel Y position of data ymin */
-    const double cloud_opacity = 0.35;
-    const double cloud_radius = 1.18;
+const double cloud_opacity = 0.50;
+const double cloud_radius = 1.70;
     const double ref_sample_opacity = 0.22;
     const double ref_sample_radius = 0.92;
     const double ideal_dot_radius = 2.28;
-    const size_t density_replicas = 4u;
-    const double replica_step = 0.0038;
-    const double replica_dx[4] = {0.0, 1.0, -1.0, 0.0};
-    const double replica_dy[4] = {0.0, 0.0, 0.0, 1.0};
+const size_t density_replicas = 6u;
+const double replica_step = 0.0040;
+const double replica_dx[6] = {0.0, 1.0, -1.0, 0.0, 1.5, -1.5};
+    const double replica_dy[6] = {0.0, 0.0, 0.0, 1.0, 0.5, -0.5};
 
     if (!path || !ref || !sig || n == 0u) {
         return -1;
@@ -1001,10 +1001,10 @@ static int write_constellation_svg(
     fprintf(f, "<text transform=\"translate(24,%.2f) rotate(-90)\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Quadrature (Q)</text>\n", (double)(mt + plot_h * 0.5));
 
     /* --- Step 4: Draw legend --- */
-    fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"3.2\" fill=\"#1d4ed8\" fill-opacity=\"0.95\"/>\n", (double)ml + 18.0, (double)mt + 20.0);
+    fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"%.2f\" fill=\"#1d4ed8\" fill-opacity=\"0.95\"/>\n", (double)ml + 18.0, (double)mt + 20.0, ideal_dot_radius);
     fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Dots</text>\n", (double)ml + 32.0, (double)mt + 24.0);
 
-    fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"3.2\" fill=\"#f97316\" fill-opacity=\"0.48\"/>\n", (double)ml + 108.0, (double)mt + 20.0);
+    fprintf(f, "<circle cx=\"%.2f\" cy=\"%.2f\" r=\"%.2f\" fill=\"#f97316\" fill-opacity=\"%.2f\"/>\n", (double)ml + 108.0, (double)mt + 20.0, cloud_radius, cloud_opacity);
     fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Clouds</text>\n", (double)ml + 122.0, (double)mt + 24.0);
 
     /* --- Step 5: Calculate display scale to normalize to unit power --- */
@@ -1623,12 +1623,12 @@ void write_constellation_stage_artifacts(
     /* Emit one dots/clouds SVG per stage using the current 4x density renderer. */
     if (is_input) {
         snprintf(csv_path, sizeof(csv_path), "%s/%s_input.csv", csv_run_dir, file_prefix);
-        snprintf(svg_path, sizeof(svg_path), "%s/%s_input_dots_clouds%s.svg", svg_run_dir, file_prefix, info.metric_tag);
-        snprintf(title, sizeof(title), "%.32s input (Dots/Clouds)%.160s", title_prefix, info.metric_suffix);
+        snprintf(svg_path, sizeof(svg_path), "%s/%s_input.svg", svg_run_dir, file_prefix);
+        snprintf(title, sizeof(title), "%.32s input%.160s", title_prefix, info.metric_suffix);
     } else {
         snprintf(csv_path, sizeof(csv_path), "%s/%s_stage_%02zu_%s.csv", csv_run_dir, file_prefix, stage_number, info.stage_slug);
-        snprintf(svg_path, sizeof(svg_path), "%s/%s_stage_%02zu_%s_dots_clouds%s.svg", svg_run_dir, file_prefix, stage_number, info.stage_slug, info.metric_tag);
-        snprintf(title, sizeof(title), "%.32s Stage %02zu: %s (Dots/Clouds)%.160s", title_prefix, stage_number, info.stage_label, info.metric_suffix);
+        snprintf(svg_path, sizeof(svg_path), "%s/%s_stage_%02zu.svg", svg_run_dir, file_prefix, stage_number);
+        snprintf(title, sizeof(title), "%.32s Stage %02zu: %s%.160s", title_prefix, stage_number, info.stage_label, info.metric_suffix);
     }
 
     write_constellation_csv(csv_path, ref, sig, nsym);
@@ -2010,6 +2010,317 @@ static int write_complex_trace_svg(
         return 0;
     }
 }
+
+/*
+ * write_spectrum_svg — Generate a frequency-domain spectrum plot as SVG
+ *
+ * What it does:
+ *   Creates an SVG image showing a frequency-domain magnitude plot (spectrum).
+ *
+ *   Used for visualizing the power spectral density or frequency response
+ *   of a signal, with frequency on the X axis and magnitude in dB on the
+ *   Y axis (range -120 dB to 0 dB).
+ *
+ * Layout:
+ *   - 980×760 pixel canvas with margins matching write_trace_svg
+ *   - X-axis: Frequency in Hz (0 to fs_hz/2)
+ *   - Y-axis: Magnitude in dB (-120 to 0)
+ *   - Grid lines at 10 dB intervals
+ *   - Filled blue region under the curve
+ *   - Noise floor region highlighted
+ *   - Self-contained SVG (no external CSS)
+ *
+ * Parameters:
+ *   path     — SVG file path to write
+ *   freq_hz  — Array of frequency values in Hz (one per bin)
+ *   mag_dB   — Array of magnitude values in dB (one per bin)
+ *   n_bins   — Number of frequency bins
+ *   fs_hz    — Sampling rate in Hz (used for axis labels)
+ *   title    — Chart title
+ *
+ * Returns:
+ *   0 on success, -1 if arguments invalid, -2 if file can't be opened
+ */
+int write_spectrum_svg(const char* path, const double* freq_hz, const double* mag_dB, size_t n_bins, double fs_hz, const char* title) {
+    FILE* f;
+    size_t i;
+
+    const int width = 980;
+    const int height = 760;
+    const int ml = 80;    /* left margin */
+    const int mr = 30;    /* right margin */
+    const int mt = 50;    /* top margin */
+    const int mb = 80;    /* bottom margin */
+    const double plot_w = (double)(width - ml - mr);
+    const double plot_h = (double)(height - mt - mb);
+
+    if (!path || !freq_hz || !mag_dB || n_bins == 0u) {
+        return -1;
+    }
+
+    /* Compute data range for Y-axis */
+    double min_mag = mag_dB[0], max_mag = mag_dB[0];
+    size_t mi;
+    for (mi = 1u; mi < n_bins; mi++) {
+        if (mag_dB[mi] < min_mag) min_mag = mag_dB[mi];
+        if (mag_dB[mi] > max_mag) max_mag = mag_dB[mi];
+    }
+    /* Round to neat 10 dB ticks with headroom */
+    double y_max = ceil(max_mag / 10.0) * 10.0 + 10.0;
+    double y_min = floor(min_mag / 10.0) * 10.0 - 10.0;
+    if (y_max - y_min < 80.0) y_min = y_max - 80.0;  /* ensure min 80 dB range */
+    const double y_span = y_max - y_min;
+    const double y_scale = plot_h / y_span;
+
+    double f_max, x_scale;
+
+    /* X axis range: use data range when zoomed (freq[0] > 0), else 0 to fs/2 */
+    double f_min = 0.0;
+    f_max = (fs_hz > 0.0) ? fs_hz / 2.0 : freq_hz[n_bins - 1u];
+    if (fs_hz <= 0.0 && fabs(freq_hz[0]) > 0.0) {
+        f_min = freq_hz[0];
+    }
+    if (f_max <= 0.0) f_max = 1.0;
+    x_scale = plot_w / (f_max - f_min);
+
+    f = fopen(path, "w");
+    if (!f) {
+        return -2;
+    }
+
+    /* ---- SVG header, background, title, plot area ---- */
+    fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">\n", width, height, width, height);
+    fprintf(f, "<rect width=\"100%%\" height=\"100%%\" fill=\"#f8fafc\"/>\n");
+    fprintf(f, "<text x=\"%d\" y=\"30\" font-family=\"sans-serif\" font-size=\"24\" fill=\"#111827\">%s</text>\n", ml, title ? title : "Spectrum");
+    fprintf(f, "<rect x=\"%d\" y=\"%d\" width=\"%.2f\" height=\"%.2f\" fill=\"white\" stroke=\"#d1d5db\"/>\n", ml, mt, plot_w, plot_h);
+
+    /* ---- Horizontal grid lines at 10 dB intervals ---- */
+    {
+        double dB_start = ceil(y_min / 10.0) * 10.0;
+        double dB_end   = floor(y_max / 10.0) * 10.0;
+        for (double dB_val = dB_start; dB_val <= dB_end + 0.01; dB_val += 10.0) {
+            const double y = (double)(height - mb) - (dB_val - y_min) * y_scale;
+            /* Major grid every 30 dB */
+            int is_major = (fmod(dB_val, 30.0) < 0.001);
+            fprintf(f, "<line x1=\"%d\" y1=\"%.2f\" x2=\"%d\" y2=\"%.2f\" stroke=\"%s\" stroke-width=\"%d\"/>\n",
+                    ml, y, width - mr, y,
+                    is_major ? "#cbd5e1" : "#e5e7eb", 1);
+            fprintf(f, "<text x=\"%d\" y=\"%.2f\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%.0f</text>\n",
+                    ml - 8, y + 4.0, dB_val);
+        }
+    }
+
+    /* ---- Vertical grid lines (frequency) ---- */
+    {
+        /* Choose nice frequency step based on f_max */
+        double freq_step;
+        double nice_steps[] = {1e3, 2e3, 5e3, 10e3, 20e3, 50e3, 100e3, 200e3, 500e3, 1e6, 2e6, 5e6, 10e6, 20e6, 50e6};
+        size_t n_nice = sizeof(nice_steps) / sizeof(nice_steps[0]);
+        size_t si;
+
+        /* Pick a step that gives roughly 5-8 grid lines based on span */
+        freq_step = nice_steps[0];
+        {
+            double span = f_max - f_min;
+            for (si = 0u; si < n_nice; ++si) {
+                if (span / nice_steps[si] <= 8.0 && span / nice_steps[si] >= 3.0) {
+                    freq_step = nice_steps[si];
+                    break;
+                }
+            }
+            if (span / freq_step > 8.0 || span / freq_step < 3.0) {
+                freq_step = span / 6.0;
+            }
+        }
+
+        /* Start from the first grid line >= f_min */
+        double fv = floor(f_min / freq_step) * freq_step;
+        if (fv < f_min) fv += freq_step;
+        for (; fv <= f_max + freq_step * 0.01; fv += freq_step) {
+            const double x = (double)ml + (fv - f_min) * x_scale;
+            if (x > (double)(width - mr) + 0.5) break;
+
+            fprintf(f, "<line x1=\"%.2f\" y1=\"%d\" x2=\"%.2f\" y2=\"%d\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\n", x, mt, x, height - mb);
+
+            /* Format frequency label (handle negative frequencies) */
+            {
+                double abs_fv = (fv < 0.0) ? -fv : fv;
+                if (abs_fv >= 1e6) {
+                    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%s%.1fM</text>\n", x, (double)(height - mb + 18), fv < 0.0 ? "-" : "", abs_fv / 1e6);
+                } else if (abs_fv >= 1e3) {
+                    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%s%.0fk</text>\n", x, (double)(height - mb + 18), fv < 0.0 ? "-" : "", abs_fv / 1e3);
+                } else {
+                    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%.0f</text>\n", x, (double)(height - mb + 18), fv);
+                }
+            }
+        }
+    }
+
+    /* ---- Axis labels ---- */
+    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Frequency (Hz)</text>\n",
+            (double)(ml + (int)plot_w / 2), (double)(height - 28));
+    fprintf(f, "<text transform=\"translate(24,%.2f) rotate(-90)\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Magnitude (dB)</text>\n",
+            (double)(mt + (int)plot_h / 2));
+
+    /* ---- Filled blue region under the curve ---- */
+    fprintf(f, "<polygon fill=\"#3b82f6\" fill-opacity=\"0.15\" stroke=\"none\" points=\"");
+    /* Start at bottom-left of the curve */
+    fprintf(f, "%.2f,%.2f ", (double)ml, (double)(height - mb));
+    for (i = 0u; i < n_bins; ++i) {
+        const double x = (double)ml + (freq_hz[i] - f_min) * x_scale;
+        const double clamped_dB = (mag_dB[i] < y_min) ? y_min : ((mag_dB[i] > y_max) ? y_max : mag_dB[i]);
+        const double y = (double)(height - mb) - (clamped_dB - y_min) * y_scale;
+        if (x >= (double)ml && x <= (double)(width - mr)) {
+            fprintf(f, "%.2f,%.2f ", x, y);
+        }
+    }
+    /* Close polygon at bottom-right */
+    {
+        const double last_x = (double)ml + (freq_hz[n_bins - 1u] - f_min) * x_scale;
+        const double clamped_last_x = (last_x > (double)(width - mr)) ? (double)(width - mr) : last_x;
+        fprintf(f, "%.2f,%.2f ", clamped_last_x, (double)(height - mb));
+    }
+    fprintf(f, "\"/>\n");
+
+    /* ---- Spectrum line (blue) ---- */
+    fprintf(f, "<polyline fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"1.5\" points=\"");
+    for (i = 0u; i < n_bins; ++i) {
+        const double x = (double)ml + (freq_hz[i] - f_min) * x_scale;
+        const double clamped_dB = (mag_dB[i] < y_min) ? y_min : ((mag_dB[i] > y_max) ? y_max : mag_dB[i]);
+        const double y = (double)(height - mb) - (clamped_dB - y_min) * y_scale;
+        if (x >= (double)ml && x <= (double)(width - mr)) {
+            fprintf(f, "%.2f,%.2f ", x, y);
+        }
+    }
+    fprintf(f, "\"/>\n");
+
+    /* ---- Legend ---- */
+    fprintf(f, "<line x1=\"%.2f\" y1=\"%.2f\" x2=\"%.2f\" y2=\"%.2f\" stroke=\"#3b82f6\" stroke-width=\"2\"/>\n", (double)ml + 18.0, (double)mt + 20.0, (double)ml + 38.0, (double)mt + 20.0);
+    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Spectrum</text>\n", (double)ml + 44.0, (double)mt + 24.0);
+
+    fprintf(f, "</svg>\n");
+    fclose(f);
+    return 0;
+}
+
+int write_dual_spectrum_svg(const char* path, const double* freq_hz,
+                            const double* mag1_dB, const double* mag2_dB,
+                            size_t n_bins, double fs_hz, const char* title) {
+    FILE* f;
+    size_t i;
+    const int width = 980, height = 760, ml = 80, mr = 30, mt = 50, mb = 80;
+    const double plot_w = (double)(width - ml - mr);
+    const double plot_h = (double)(height - mt - mb);
+
+    if (!path || !freq_hz || !mag1_dB || !mag2_dB || n_bins == 0u) return -1;
+
+    double min_mag = mag1_dB[0], max_mag = mag1_dB[0];
+    for (i = 1u; i < n_bins; i++) {
+        if (mag1_dB[i] < min_mag) min_mag = mag1_dB[i];
+        if (mag1_dB[i] > max_mag) max_mag = mag1_dB[i];
+        if (mag2_dB[i] < min_mag) min_mag = mag2_dB[i];
+        if (mag2_dB[i] > max_mag) max_mag = mag2_dB[i];
+    }
+    double y_max = ceil(max_mag / 10.0) * 10.0 + 10.0;
+    double y_min = floor(min_mag / 10.0) * 10.0 - 10.0;
+    if (y_max - y_min < 80.0) y_min = y_max - 80.0;
+    const double y_span = y_max - y_min;
+    const double y_scale = plot_h / y_span;
+    double f_min = 0.0, f_max, x_scale;
+
+    f_max = (fs_hz > 0.0) ? fs_hz / 2.0 : freq_hz[n_bins - 1u];
+    if (fs_hz <= 0.0 && fabs(freq_hz[0]) > 0.0) f_min = freq_hz[0];
+    if (f_max <= 0.0) f_max = 1.0;
+    x_scale = plot_w / (f_max - f_min);
+
+    f = fopen(path, "w");
+    if (!f) return -2;
+
+    fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">\n", width, height, width, height);
+    fprintf(f, "<rect width=\"100%%\" height=\"100%%\" fill=\"#f8fafc\"/>\n");
+    fprintf(f, "<text x=\"%d\" y=\"30\" font-family=\"sans-serif\" font-size=\"24\" fill=\"#111827\">%s</text>\n", ml, title ? title : "Spectrum (I/Q)");
+    fprintf(f, "<rect x=\"%d\" y=\"%d\" width=\"%.2f\" height=\"%.2f\" fill=\"white\" stroke=\"#d1d5db\"/>\n", ml, mt, plot_w, plot_h);
+
+    /* Horizontal grid lines at 10 dB */
+    {
+        double ds = ceil(y_min / 10.0) * 10.0;
+        double de = floor(y_max / 10.0) * 10.0;
+        for (double dv = ds; dv <= de + 0.01; dv += 10.0) {
+            double y = (double)(height - mb) - (dv - y_min) * y_scale;
+            fprintf(f, "<line x1=\"%d\" y1=\"%.2f\" x2=\"%d\" y2=\"%.2f\" stroke=\"%s\" stroke-width=\"1\"/>\n", ml, y, width - mr, y, fmod(dv, 30.0) < 0.001 ? "#cbd5e1" : "#e5e7eb");
+            fprintf(f, "<text x=\"%d\" y=\"%.2f\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%.0f</text>\n", ml - 8, y + 4.0, dv);
+        }
+    }
+
+    /* Vertical grid lines */
+    {
+        double span = f_max - f_min, step;
+        double nice[] = {1e3,2e3,5e3,10e3,20e3,50e3,100e3,200e3,500e3,1e6,2e6,5e6,10e6,20e6,50e6};
+        size_t ns = sizeof(nice)/sizeof(nice[0]), si;
+        for (step = nice[0], si = 0u; si < ns; si++) {
+            if (span/nice[si] <= 8.0 && span/nice[si] >= 3.0) { step = nice[si]; break; }
+        }
+        if (span/step > 8.0 || span/step < 3.0) step = span/6.0;
+        double fv = floor(f_min/step)*step;
+        if (fv < f_min) fv += step;
+        for (; fv <= f_max+step*0.01; fv += step) {
+            double x = (double)ml + (fv-f_min)*x_scale;
+            if (x > (double)(width-mr)+0.5) break;
+            fprintf(f, "<line x1=\"%.2f\" y1=\"%d\" x2=\"%.2f\" y2=\"%d\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\n", x, mt, x, height-mb);
+            double af = fv < 0 ? -fv : fv;
+            const char *sign = fv < 0 ? "-" : "";
+            if (af >= 1e6) fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%s%.1fM</text>\n", x, (double)(height-mb+18), sign, af/1e6);
+            else if (af >= 1e3) fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%s%.0fk</text>\n", x, (double)(height-mb+18), sign, af/1e3);
+            else fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%.0f</text>\n", x, (double)(height-mb+18), fv);
+        }
+    }
+
+    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Frequency (Hz)</text>\n", (double)(ml+(int)plot_w/2), (double)(height-28));
+    fprintf(f, "<text transform=\"translate(24,%.2f) rotate(-90)\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Magnitude (dB)</text>\n", (double)(mt+(int)plot_h/2));
+
+    /* Filled region under I trace */
+    fprintf(f, "<polygon fill=\"#3b82f6\" fill-opacity=\"0.10\" stroke=\"none\" points=\"");
+    fprintf(f, "%.2f,%.2f ", (double)ml, (double)(height-mb));
+    for (i = 0u; i < n_bins; i++) {
+        double x = (double)ml + (freq_hz[i]-f_min)*x_scale;
+        double c = mag1_dB[i] < y_min ? y_min : (mag1_dB[i] > y_max ? y_max : mag1_dB[i]);
+        double y = (double)(height-mb) - (c-y_min)*y_scale;
+        if (x >= ml && x <= width-mr) fprintf(f, "%.2f,%.2f ", x, y);
+    }
+    { double lx = (double)ml + (freq_hz[n_bins-1]-f_min)*x_scale; if (lx > width-mr) lx = width-mr; fprintf(f, "%.2f,%.2f ", lx, (double)(height-mb)); }
+    fprintf(f, "\"/>\n");
+
+    /* I trace line */
+    fprintf(f, "<polyline fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"1.5\" points=\"");
+    for (i = 0u; i < n_bins; i++) {
+        double x = (double)ml + (freq_hz[i]-f_min)*x_scale;
+        double c = mag1_dB[i] < y_min ? y_min : (mag1_dB[i] > y_max ? y_max : mag1_dB[i]);
+        double y = (double)(height-mb) - (c-y_min)*y_scale;
+        if (x >= ml && x <= width-mr) fprintf(f, "%.2f,%.2f ", x, y);
+    }
+    fprintf(f, "\"/>\n");
+
+    /* Q trace line (orange) */
+    fprintf(f, "<polyline fill=\"none\" stroke=\"#f97316\" stroke-width=\"1.5\" points=\"");
+    for (i = 0u; i < n_bins; i++) {
+        double x = (double)ml + (freq_hz[i]-f_min)*x_scale;
+        double c = mag2_dB[i] < y_min ? y_min : (mag2_dB[i] > y_max ? y_max : mag2_dB[i]);
+        double y = (double)(height-mb) - (c-y_min)*y_scale;
+        if (x >= ml && x <= width-mr) fprintf(f, "%.2f,%.2f ", x, y);
+    }
+    fprintf(f, "\"/>\n");
+
+    /* Legend */
+    fprintf(f, "<line x1=\"%.2f\" y1=\"%.2f\" x2=\"%.2f\" y2=\"%.2f\" stroke=\"#3b82f6\" stroke-width=\"2\"/>\n", ml+18.0, mt+20.0, ml+38.0, mt+20.0);
+    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">I</text>\n", (double)ml+44.0, (double)mt+24.0);
+    fprintf(f, "<line x1=\"%.2f\" y1=\"%.2f\" x2=\"%.2f\" y2=\"%.2f\" stroke=\"#f97316\" stroke-width=\"2\"/>\n", ml+76.0, mt+20.0, ml+96.0, mt+20.0);
+    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Q</text>\n", (double)ml+102.0, (double)mt+24.0);
+
+    fprintf(f, "</svg>\n");
+    fclose(f);
+    return 0;
+}
+
 
 void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* file_prefix, size_t stage_number, int is_input, const char* raw_stage_name, const StageMetric* metric, const Complex* sig, size_t nsym, double fs_hz, double signal_hz, double display_window_us) {
     static Complex* rf_prev_postmix_window = NULL;

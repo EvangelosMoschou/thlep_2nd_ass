@@ -19,12 +19,16 @@ constellation SVGs, and time-domain trace SVGs per receiver stage.
 ```
 receiver_dual_sim/
 ├── data_input/
-│   └── receiver_config.csv       ← Single config: chain topology + datasheet specs
+│   ├── 20ghz/
+│   │   ├── receiver.csv          ← Receiver chain: topology + datasheet specs
+│   │   └── transmitter.csv       ← Transmitter chain configuration
+│   ├── component_cache/          ← Digi-Key API cache
+│   └── component_cache.db        ← Component database
 ├── src/
 │   ├── main.c                    ← Orchestrator: CLI, cascade, propagation, simulation
 │   ├── propagation.c             ← Part D: FSPL, rain (P.838-3), fog (P.840-9), gas (P.676-13)
 │   ├── cascade.c                 ← Part E: Friis NF, IIP3, dynamic range, sensitivity
-│   ├── component_catalog.c       ← Loads datasheet values from receiver_config.csv
+│   ├── component_catalog.c       ← Loads datasheet values from receiver.csv
 │   ├── signal_chain.c            ← Per-stage signal processing (gain, noise, nonlinearity)
 │   ├── sim_baseband.c            ← Complex baseband analytical path
 │   ├── stage_models.c            ← CSV-driven stage chain loader
@@ -84,7 +88,7 @@ SFDR:             35.52 dB
 ```
 
 Component IIP3/P1dB values come from **datasheet values** in
-`data_input/receiver_config.csv` (LNA1 ADL8142S: OIP3=17.5 dBm,
+`data_input/20ghz/receiver.csv` (LNA1 ADL8142S: OIP3=17.5 dBm,
 Mixer1 HMC264LC3B: IIP3=14 dBm, etc.), overriding the runtime CSV.
 
 ## Build
@@ -131,10 +135,11 @@ out/matlab/               ← MATLAB reference figures
 
 ## Configuration
 
-Single file `data_input/receiver_config.csv` drives everything:
-- Chain topology (3 chains: baseband_rx, rf_frontend, rf_postmix_bb)
-- Component parameters (gain, NF, filter length, limiter flag)
-- Datasheet specs (part number, OIP3, IIP3, P1dB)
+Per-frequency folders under `data_input/<freq>/` drive everything:
+- `receiver.csv` — chain topology (3 chains: baseband_rx, rf_frontend, rf_postmix_bb),
+  component parameters (gain, NF, filter length), and datasheet specs (OIP3, IIP3, P1dB)
+- `transmitter.csv` — transmitter chain configuration
+Use `--stage-csv data_input/<freq>/receiver.csv` to select a different frequency band.
 
 ## MATLAB Reference
 

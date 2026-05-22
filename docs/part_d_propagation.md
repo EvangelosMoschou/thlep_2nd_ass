@@ -31,7 +31,7 @@ the requirements of **Μέρος Δ** of the final assignment:
 |-------|------|---------|-------------|
 | `frequency_hz` | `double` | 24.0e9 | Carrier frequency [Hz] |
 | `distance_km` | `double` | 36000.0 | Slant-path distance (GEO) [km] |
-| `elevation_deg` | `double` | 30.0 | Elevation angle [°] |
+| `elevation_deg` | `double` | 44.0 | Elevation angle [°] |
 | `polarization_deg` | `double` | 45.0 | Polarization tilt [°] (45 = circular, 0 = horiz, 90 = vert) |
 | `rain_rate_mmh` | `double` | 10.0 | Point rain rate [mm/h] (0.01% exceedance) |
 | `surface_temp_k` | `double` | 288.15 | Surface temperature [K] (15 °C) |
@@ -39,7 +39,7 @@ the requirements of **Μέρος Δ** of the final assignment:
 | `water_vapor_gm3` | `double` | 7.5 | Surface water-vapour density [g/m³] |
 | `liquid_water_gm3` | `double` | 0.05 | Cloud liquid-water density [g/m³] (0.05 = medium fog) |
 | `eirp_dbm` | `double` | 85.0 | Satellite EIRP [dBm] |
-| `rx_gain_dbi` | `double` | 40.0 | Ground-station antenna gain [dBi] |
+| `rx_gain_dbi` | `double` | 68.7 | Ground-station antenna gain [dBi] |
 | `rx_sensitivity_dbm` | `double` | −70.0 | Receiver sensitivity [dBm] (placeholder — from Part E) |
 
 ### Result Fields (`LinkBudgetResult`)
@@ -176,7 +176,7 @@ sensitivity by the margin amount).
 |-----------|-------|--------|
 | Frequency | 24.0 GHz | Receiver design |
 | Orbit | GEO (36 000 km) | Assignment assumption |
-| Elevation | 30° | Generic |
+| Elevation | 44° | Athens→SES-17 |
 | Polarisation | Circular (45°) | TBD with team |
 | Rain rate | 10 mm/h (0.01 %) | Generic ITU reference |
 | Pressure | 1013.25 hPa | Sea level standard |
@@ -253,7 +253,7 @@ In `main.c`, the propagation analysis runs before the receiver simulation:
 PropagationScenario prop_scenario = {
     .frequency_hz         = cfg.carrier_hz,      /* 24.0e9 */
     .distance_km          = 36000.0,
-    .elevation_deg        = 30.0,
+    .elevation_deg        = 44.0,
     .polarization_deg     = 45.0,
     .rain_rate_mmh        = 10.0,
     .surface_temp_k       = 288.15,
@@ -261,7 +261,7 @@ PropagationScenario prop_scenario = {
     .water_vapor_gm3      = 7.5,
     .liquid_water_gm3     = 0.05,
     .eirp_dbm             = 85.0,
-    .rx_gain_dbi          = 40.0,
+    .rx_gain_dbi          = 68.7,
     .rx_sensitivity_dbm   = -70.0
 };
 LinkBudgetResult prop_budget;

@@ -23,7 +23,7 @@
  *   PropagationScenario scenario = {
  *       .frequency_hz        = 24.0e9,
  *       .distance_km         = 36000.0,
- *       .elevation_deg       = 30.0,
+ *       .elevation_deg       = 44.0,
  *       .polarization_deg    = 45.0,         // circular
  *       .rain_rate_mmh       = 10.0,          // 0.01% exceedance
  *       .surface_temp_k      = 288.15,
@@ -55,7 +55,7 @@ typedef struct PropagationScenario {
     /* --- Link geometry --- */
     double frequency_hz;         /**< Carrier frequency [Hz].         (e.g. 24.0e9) */
     double distance_km;          /**< Slant path distance [km].       (GEO ~36000 km) */
-    double elevation_deg;        /**< Elevation angle [deg].          (e.g. 30°) */
+    double elevation_deg;        /**< Elevation angle [deg].          (e.g. 44°) */
 
     /* --- Polarisation (for rain model) --- */
     double polarization_deg;     /**< Polarisation tilt angle [deg].

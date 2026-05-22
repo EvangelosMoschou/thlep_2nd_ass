@@ -36,6 +36,52 @@
 #include "sim_types.h"
 #include "stage_artifacts.h"
 #include "stage_models.h"
+#include "fft.h"
+
+/* Write spectrum SVG for a real-valued signal within a frequency window.
+ * center_hz and span_hz define the display window; bins outside are filtered. */
+static void write_stage_spectrum(const char *dir, const char *prefix,
+                                  size_t num, const char *name,
+                                  const double *signal, size_t nsamp,
+                                  double fs_hz,
+                                  double center_hz, double span_hz) {
+    if (!dir || !signal || nsamp < 256u) return;
+    size_t nfft = 1u;
+    while (nfft * 2u <= nsamp) nfft *= 2u;
+    size_t n_bins = nfft / 2u;
+    double *freq = malloc(n_bins * sizeof(double));
+    double *mag  = malloc(n_bins * sizeof(double));
+    if (!freq || !mag) { free(freq); free(mag); return; }
+    if (fft_spectrum_dB(signal, nfft, fs_hz, freq, mag, n_bins) > 0) {
+        if (span_hz > 0.0) {
+            double f_lo = center_hz - span_hz * 0.5, f_hi = center_hz + span_hz * 0.5;
+            size_t wi = 0u, ri;
+            for (ri = 0u; ri < n_bins; ri++) {
+                if (freq[ri] >= f_lo && freq[ri] <= f_hi) {
+                    freq[wi] = freq[ri]; mag[wi] = mag[ri]; wi++;
+                }
+            }
+            if (wi > 1u) { n_bins = wi; fs_hz = 0.0; }
+        }
+        size_t max_display = 1000u;
+        if (n_bins > max_display) {
+            size_t stride = n_bins / max_display, di;
+            for (di = 0u; di < max_display; di++) {
+                double sum = 0.0; size_t si;
+                for (si = 0u; si < stride && di * stride + si < n_bins; si++)
+                    sum += mag[di * stride + si];
+                mag[di] = sum / (double)stride;
+                freq[di] = freq[di * stride + stride / 2u];
+            }
+            n_bins = max_display;
+        }
+        char path[512], title[256];
+        humanize_stage_name(name, title, sizeof(title));
+        snprintf(path, sizeof(path), "%s/%s_stage_%02zu_spectrum.svg", dir, prefix, num);
+        write_spectrum_svg(path, freq, mag, n_bins, fs_hz, title);
+    }
+    free(freq); free(mag);
+}
 
 /* --- Propagation analysis (Part D: FSPL, rain, fog, gas, link margin) --- */
 #include "propagation.h"
@@ -183,6 +229,17 @@ static StageMetric apply_stage_real_fused(const StageModel *stg,
   double sigma = (pn_add > 0.0) ? sqrt(pn_add) : 0.0;
   int has_limiter = stg->is_limiter;
   const double max_amp = 10.0;
+
+  int do_mix = (stg->lo_hz > 0.0);
+  double dtheta_mix = do_mix ? (2.0 * M_PI * stg->lo_hz / fs_hz) : 0.0;
+
+  if (do_mix) {
+    for (i = 0; i < n; i++) {
+      double lo = cos(dtheta_mix * (double)i);
+      ref[i] *= lo;
+      sig[i] *= lo;
+    }
+  }
 
 #pragma omp parallel for schedule(static)
   for (i = 0; i < n; i++) {
@@ -1047,7 +1104,8 @@ static int simulate_bruteforce_rf(
     const Complex *tx_symbols, const Complex *constellation_template,
     size_t constellation_count, size_t nsym, StageMetric *metrics,
     size_t *metric_count, double *final_vpp, int *used_sps, double *used_fs_hz,
-    const char *csv_dir, const char *const_dir, const char *trace_dir) {
+    const char *csv_dir, const char *const_dir, const char *trace_dir,
+    const char *spectrum_dir) {
 
   const StageModel *rf_stages = NULL;
   const StageModel *bb_stages = NULL;
@@ -1259,7 +1317,7 @@ static int simulate_bruteforce_rf(
       metrics[m].evm_pct = temp_metric.evm_pct;
 
       write_constellation_stage_artifacts(
-          csv_dir, const_dir, "constellations", 0u, 1, "input_rf", &metrics[m],
+          csv_dir, const_dir, "receiver", 0u, 1, "input_rf", &metrics[m],
           "RF", constellation_template, constellation_count, tx_symbols,
           temp_sig_sym, temp_eval_n);
     }
@@ -1270,24 +1328,37 @@ static int simulate_bruteforce_rf(
   t_pulse = omp_get_wtime();
 
   /* Step 6: Process through RF frontend stages */
+  double current_center_hz = cfg->carrier_hz;
   for (i = 0u; i < rf_stage_count; ++i) {
     StageModel stage = rf_stages[i];
 
     metrics[m] =
         apply_stage_real_fused(&stage, rf_ref, rf_sig, nrf, "rf_real", N_t0_W, fs_hz,
                          cfg->carrier_hz, &N_current, &Gain_total, P_sig_in_W);
+    if (stage.lo_hz > 0.0) {
+      current_center_hz = fabs(current_center_hz - stage.lo_hz);
+    }
     metrics[m].signal_power =
         P_sig_in_W * Gain_total; /* Align with Friis model */
     write_trace_stage_artifacts(csv_dir, trace_dir, "traces", i + 1u, 0,
                                 stage.name, &metrics[m], "RF", rf_ref, rf_sig,
-                                nrf, 6000u, fs_hz, cfg->carrier_hz);
+                                nrf, 6000u, fs_hz, current_center_hz);
 
-    /* Generate Constellation & EVM for all RF Stages (SoA) */
+    {
+      double spectrum_span = 4.0e9;
+      if (stage.lo_hz > 0.0 && current_center_hz < 1e9) {
+        spectrum_span = 10.0e6;
+      }
+      write_stage_spectrum(spectrum_dir, "receiver", i + 1u, stage.name,
+                           rf_ref, nrf, fs_hz,
+                           current_center_hz, spectrum_span);
+    }
+    /* Generate Constellation & EVM for all RF Stages (SoA) -- baseline */
     {
       const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_ref, nrf, fs_hz, current_center_hz, cutoff_hz,
                    dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
-      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_sig, nrf, fs_hz, current_center_hz, cutoff_hz,
                    dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
       pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
@@ -1306,7 +1377,7 @@ static int simulate_bruteforce_rf(
       metrics[m].evm_pct = temp_metric.evm_pct;
 
       write_constellation_stage_artifacts(
-          csv_dir, const_dir, "constellations", i + 1u, 0, stage.name, &metrics[m],
+          csv_dir, const_dir, "receiver", i + 1u, 0, stage.name, &metrics[m],
           "RF", constellation_template, constellation_count, tx_symbols,
           temp_sig_sym, temp_eval_n);
     }
@@ -1319,10 +1390,52 @@ static int simulate_bruteforce_rf(
   /* Step 7: Downconvert RF → complex baseband — SoA */
   {
     const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-    mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+    mix_down_soa(rf_ref, nrf, fs_hz, current_center_hz, cutoff_hz,
                  dec_factor, bb_ref_re, bb_ref_im, i_raw, q_raw);
-    mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+    mix_down_soa(rf_sig, nrf, fs_hz, current_center_hz, cutoff_hz,
                  dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
+  }
+
+  /* IF Spectrum: complex FFT of raw downconverter output (before LPF/dec)
+   * Shows dual sidebands at ±IF after heterodyne mixing */
+  {
+    size_t nraw = nrf;  /* i_raw/q_raw have same length as RF signal */
+    size_t nfft = 1u; while (nfft * 2u <= nraw) nfft *= 2u;
+    size_t m = nfft + 2u;
+    double *freq = malloc(m * sizeof(double));
+    double *mag = malloc(m * sizeof(double));
+    if (freq && mag) {
+      int nb = fft_complex_spectrum_dB(i_raw, q_raw, nfft, fs_hz, freq, mag, m);
+      if (nb > 0) {
+        /* Zoom to ±10 MHz around IF */
+        double if_zoom_lo = (current_center_hz > 0.0) ? -10.0e6 : -10.0e6;
+        double if_zoom_hi = (current_center_hz > 0.0) ? 10.0e6 : 10.0e6;
+        size_t wi = 0u, ri; size_t nc = (size_t)nb;
+        for (ri = 0u; ri < nc; ri++) {
+          if (freq[ri] >= if_zoom_lo && freq[ri] <= if_zoom_hi) {
+            freq[wi] = freq[ri]; mag[wi] = mag[ri]; wi++;
+          }
+        }
+        if (wi > 1u) {
+          size_t max_d = 1000u, di; nc = wi;
+          if (nc > max_d) {
+            size_t stride = nc / max_d;
+            for (di = 0u; di < max_d; di++) {
+              double sa = 0.0; size_t sj, start = di * stride;
+              for (sj = 0u; sj < stride && start + sj < nc; sj++)
+                sa += mag[start + sj];
+              mag[di] = sa / (double)stride;
+              freq[di] = freq[start + stride/2u];
+            }
+            nc = max_d;
+          }
+          char path[512];
+          snprintf(path, sizeof(path), "%s/receiver_stage_07_spectrum.svg", spectrum_dir);
+          write_spectrum_svg(path, freq, mag, nc, 0.0, "IF Spectrum (raw downconverter)");
+        }
+      }
+    }
+    free(freq); free(mag);
   }
 
   t_downconv = omp_get_wtime();
@@ -1345,7 +1458,7 @@ static int simulate_bruteforce_rf(
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
     }
     write_constellation_stage_artifacts(
-        csv_dir, const_dir, "constellations", rf_stage_count + 1u, 0,
+        csv_dir, const_dir, "receiver", rf_stage_count + 1u, 0,
         metrics[m].stage, &metrics[m], "RF", constellation_template,
         constellation_count, tx_symbols, sig_sym, sig_eval_n);
     /* Pack for trace artifacts */
@@ -1376,11 +1489,44 @@ static int simulate_bruteforce_rf(
     apply_stage_soa(&stage, bb_ref_re, bb_ref_im, bb_sig_re, bb_sig_im, nbb,
                     "rf_to_bb", N_t0_W, &N_current, &Gain_total, P_sig_in_W);
 
+    {
+      double bb_fs = fs_hz / (double)dec_factor;
+      size_t nfft = 1u; while (nfft * 2u <= nbb) nfft *= 2u;
+      size_t m = nfft + 2u;
+      double *freq = malloc(m * sizeof(double));
+      double *mag = malloc(m * sizeof(double));
+      if (freq && mag) {
+        int nb = fft_complex_spectrum_dB(bb_sig_re, bb_sig_im, nfft, bb_fs, freq, mag, m);
+        if (nb > 0) {
+          size_t max_d = 1000u, di, nc = (size_t)nb;
+          if (nc > max_d) {
+            size_t stride = nc / max_d;
+            for (di = 0u; di < max_d; di++) {
+              double sa = 0.0; size_t sj, start = di * stride;
+              for (sj = 0u; sj < stride && start + sj < nc; sj++) {
+                sa += mag[start + sj];
+              }
+              mag[di] = sa / (double)stride;
+              freq[di] = freq[start + stride/2u];
+            }
+            nc = max_d;
+          }
+          char path[512];
+          snprintf(path, sizeof(path), "%s/receiver_stage_%02zu_spectrum.svg",
+                   spectrum_dir, rf_stage_count + 2u + i);
+          write_spectrum_svg(path, freq, mag, nc, 0.0, stage.name);
+        }
+      }
+      free(freq); free(mag);
+    }
+
     /* Write trace using continuous baseband waveform (match stage 6 format) */
     pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
-    write_complex_trace_stage_artifacts(
-        trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
-        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+    if (i < bb_stage_count - 1u) {
+      write_complex_trace_stage_artifacts(
+          trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+          temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+    }
 
     /* Downsample for metrics */
     pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
@@ -1391,8 +1537,6 @@ static int simulate_bruteforce_rf(
         temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
     size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
 
-    /* MATLAB parity: compare against reference that went through same
-     * processing */
     metrics[m] = compute_metric_complex(stage.name, "rf_to_bb", ref_sym,
                                         sig_sym, eval_n);
     metrics[m].signal_power = P_sig_in_W * Gain_total;
@@ -1400,15 +1544,16 @@ static int simulate_bruteforce_rf(
     metrics[m].nf_db = stage.nf_db;
     metrics[m].filter_len = stage.filter_len;
     metrics[m].is_limiter = stage.is_limiter;
-    /* Override with analytic Friis SNR */
     if (N_current > 0.0) {
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
     }
 
-    write_constellation_stage_artifacts(
-        csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, stage.name,
-        &metrics[m], "RF", constellation_template, constellation_count,
-        tx_symbols, sig_sym, eval_n);
+    if (i < bb_stage_count - 1u) {
+      write_constellation_stage_artifacts(
+          csv_dir, const_dir, "receiver", rf_stage_count + 2u + i, 0, stage.name,
+          &metrics[m], "RF", constellation_template, constellation_count,
+          tx_symbols, sig_sym, eval_n);
+    }
     ++m;
   }
 
@@ -1476,7 +1621,8 @@ static int simulate_realistic_rf(
     const Complex *tx_symbols, const Complex *constellation_template,
     size_t constellation_count, size_t nsym, StageMetric *metrics,
     size_t *metric_count, double *final_vpp, int *used_sps, double *used_fs_hz,
-    const char *csv_dir, const char *const_dir, const char *trace_dir) {
+    const char *csv_dir, const char *const_dir, const char *trace_dir,
+    const char *spectrum_dir) {
 
   const StageModel *rf_stages = NULL;
   const StageModel *bb_stages = NULL;
@@ -1764,7 +1910,7 @@ static int simulate_realistic_rf(
       metrics[m].evm_pct = temp_metric.evm_pct;
 
       write_constellation_stage_artifacts(
-          csv_dir, const_dir, "constellations", 0u, 1, "input_rf_realistic", &metrics[m],
+          csv_dir, const_dir, "receiver", 0u, 1, "input_rf_realistic", &metrics[m],
           "RF", constellation_template, constellation_count, tx_symbols,
           temp_sig_sym, temp_eval_n);
     }
@@ -1775,22 +1921,36 @@ static int simulate_realistic_rf(
   t_pulse = omp_get_wtime();
 
   /* Step 7: Process through RF frontend stages with AM-to-PM */
+  double realistic_center_hz = cfg->carrier_hz;
   for (i = 0u; i < rf_stage_count; ++i) {
     StageModel stage = rf_stages[i];
 
     metrics[m] =
         apply_stage_real_fused(&stage, rf_ref, rf_sig, nrf, "rf_real", N_t0_W, fs_hz,
                          cfg->carrier_hz, &N_current, &Gain_total, P_sig_in_W);
+    if (stage.lo_hz > 0.0) {
+      realistic_center_hz = fabs(realistic_center_hz - stage.lo_hz);
+    }
     metrics[m].signal_power = P_sig_in_W * Gain_total;
     write_trace_stage_artifacts(csv_dir, trace_dir, "traces", i + 1u, 0,
                                 stage.name, &metrics[m], "RF", rf_ref, rf_sig,
-                                nrf, 6000u, fs_hz, cfg->carrier_hz);
+                                nrf, 6000u, fs_hz, realistic_center_hz);
 
     {
+      double spectrum_span = 4.0e9;
+      if (stage.lo_hz > 0.0 && realistic_center_hz < 1e9) {
+        spectrum_span = 10.0e6;
+      }
+      write_stage_spectrum(spectrum_dir, "receiver", i + 1u, stage.name,
+                           rf_ref, nrf, fs_hz,
+                           realistic_center_hz, spectrum_span);
+    }
+
+    {  /* Generate Constellation & EVM for realistic path */
       const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_ref, nrf, fs_hz, realistic_center_hz, cutoff_hz,
                    dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
-      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_sig, nrf, fs_hz, realistic_center_hz, cutoff_hz,
                    dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
       pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
@@ -1809,7 +1969,7 @@ static int simulate_realistic_rf(
       metrics[m].evm_pct = temp_metric.evm_pct;
 
       write_constellation_stage_artifacts(
-          csv_dir, const_dir, "constellations", i + 1u, 0, stage.name, &metrics[m],
+          csv_dir, const_dir, "receiver", i + 1u, 0, stage.name, &metrics[m],
           "RF", constellation_template, constellation_count, tx_symbols,
           temp_sig_sym, temp_eval_n);
     }
@@ -1822,9 +1982,9 @@ static int simulate_realistic_rf(
   /* Step 8: Downconvert RF → complex baseband — SoA */
   {
     const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-    mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+    mix_down_soa(rf_ref, nrf, fs_hz, realistic_center_hz, cutoff_hz,
                  dec_factor, bb_ref_re, bb_ref_im, i_raw, q_raw);
-    mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+    mix_down_soa(rf_sig, nrf, fs_hz, realistic_center_hz, cutoff_hz,
                  dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
   }
 
@@ -1874,7 +2034,7 @@ static int simulate_realistic_rf(
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
     }
     write_constellation_stage_artifacts(
-        csv_dir, const_dir, "constellations", rf_stage_count + 1u, 0,
+        csv_dir, const_dir, "receiver", rf_stage_count + 1u, 0,
         metrics[m].stage, &metrics[m], "RF", constellation_template,
         constellation_count, tx_symbols, sig_sym, sig_eval_n);
     pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
@@ -1921,11 +2081,44 @@ static int simulate_realistic_rf(
 
     snprintf(realistic_stage_name, sizeof(realistic_stage_name), "%s Realistic", stage.name);
 
-    /* Write trace using continuous baseband waveform (match stage 6 format) */
+    {
+      double bb_fs = fs_hz / (double)dec_factor;
+      size_t nfft = 1u; while (nfft * 2u <= nbb) nfft *= 2u;
+      size_t m = nfft + 2u;
+      double *freq = malloc(m * sizeof(double));
+      double *mag = malloc(m * sizeof(double));
+      if (freq && mag) {
+        int nb = fft_complex_spectrum_dB(bb_sig_re, bb_sig_im, nfft, bb_fs, freq, mag, m);
+        if (nb > 0) {
+          size_t max_d = 1000u, di, nc = (size_t)nb;
+          if (nc > max_d) {
+            size_t stride = nc / max_d;
+            for (di = 0u; di < max_d; di++) {
+              double sa = 0.0; size_t sj, start = di * stride;
+              for (sj = 0u; sj < stride && start + sj < nc; sj++) {
+                sa += mag[start + sj];
+              }
+              mag[di] = sa / (double)stride;
+              freq[di] = freq[start + stride/2u];
+            }
+            nc = max_d;
+          }
+          char path[512];
+          snprintf(path, sizeof(path), "%s/receiver_stage_%02zu_spectrum.svg",
+                   spectrum_dir, rf_stage_count + 2u + i);
+          write_spectrum_svg(path, freq, mag, nc, 0.0, realistic_stage_name);
+        }
+      }
+      free(freq); free(mag);
+    }
+
+    /* Write trace using continuous baseband waveform (match stage 6 format) -- realistic */
     pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
-    write_complex_trace_stage_artifacts(
-        trace_dir, "traces", rf_stage_count + 2u + i, 0, realistic_stage_name, &metrics[m],
-        temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+    if (i < bb_stage_count - 1u) {
+      write_complex_trace_stage_artifacts(
+          trace_dir, "traces", rf_stage_count + 2u + i, 0, realistic_stage_name, &metrics[m],
+          temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
+    }
 
     /* Downsample for metrics */
     pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
@@ -1936,6 +2129,10 @@ static int simulate_realistic_rf(
         temp_complex_buf, nbb, nsym, bb_sps, cfg->rolloff, tx_symbols, sig_sym);
     size_t eval_n = (ref_eval_n < sig_eval_n) ? ref_eval_n : sig_eval_n;
 
+    /* MATLAB parity:
+     * Metrics are computed from downsampled symbols, not from the oversampled
+     * waveform.  This matches the baseband path and the MATLAB cascade order of
+     * processing */
     metrics[m] = compute_metric_complex(stage.name, "rf_to_bb", ref_sym,
                                         sig_sym, eval_n);
     metrics[m].signal_power = P_sig_in_W * Gain_total;
@@ -1943,14 +2140,17 @@ static int simulate_realistic_rf(
     metrics[m].nf_db = stage.nf_db;
     metrics[m].filter_len = stage.filter_len;
     metrics[m].is_limiter = stage.is_limiter;
+    /* Override with analytic Friis SNR */
     if (N_current > 0.0) {
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
     }
 
-    write_constellation_stage_artifacts(
-        csv_dir, const_dir, "constellations", rf_stage_count + 2u + i, 0, realistic_stage_name,
-        &metrics[m], "RF", constellation_template, constellation_count,
-        tx_symbols, sig_sym, eval_n);
+    if (i < bb_stage_count - 1u) {
+      write_constellation_stage_artifacts(
+          csv_dir, const_dir, "receiver", rf_stage_count + 2u + i, 0, stage.name,
+          &metrics[m], "RF", constellation_template, constellation_count,
+          tx_symbols, sig_sym, eval_n);
+    }
     ++m;
   }
 
@@ -2229,10 +2429,10 @@ static void print_usage(const char *exe) {
   printf("  --symbol-rate <Hz>    Symbol rate in Hz (default: 1e7)\n");
   printf("  --rf-fs <Hz>          RF brute-force sample rate in Hz (default: "
          "9.6e10)\n");
-  printf("  --carrier <Hz>        Carrier frequency in Hz (default: 2.4e10)\n");
+  printf("  --carrier <Hz>        Carrier frequency in Hz (default: 2.0e10)\n");
   printf("  --snr <dB>            Input SNR in dB (default: 20)\n");
   printf("  --stage-csv <path>    Stage-model CSV file or folder (default: "
-          "data_input/receiver_config.csv)\n");
+          "data_input/20ghz/receiver.csv)\n");
   printf("  --topology-sim <1..4> Output simulation slot under "
          "out/topology_sim_N (default: 1)\n");
   printf("  --stage-sim <1..4>    Alias for --topology-sim\n");
@@ -2281,20 +2481,25 @@ int main(int argc, char **argv) {
   char project_root[512] = "";
   SimConfig cfg;               /* Top-level simulation parameters */
   StageModelsConfig stage_cfg; /* Loaded stage chain configuration */
+  StageModelsConfig tx_stage_cfg; /* Transmitter stage chain configuration */
   char stage_csv_path[512] =
-      "data_input/receiver_config.csv"; /* Default CSV path */
+      "data_input/20ghz/receiver.csv"; /* Default CSV path */
+  char tx_stage_csv_path[512] =
+      "data_input/20ghz/transmitter.csv"; /* Default transmitter CSV path */
   char resolved_stage_csv_path[512]; /* Resolved path after directory resolution
-                                      */
+                                       */
   char stage_err[256];               /* Error message buffer for CSV loading */
 
   char out_dir[512] = "out";
   /* Resolve project root from executable location so paths work even when
    * the binary is launched by double-click (working dir ≠ project root). */
   if (resolve_project_root(project_root, sizeof(project_root)) == 0) {
-      /* Prepend project root to the default CSV path */
+      /* Prepend project root to the default CSV paths */
       char tmp[512];
       snprintf(tmp, sizeof(tmp), "%s/%s", project_root, stage_csv_path);
       snprintf(stage_csv_path, sizeof(stage_csv_path), "%s", tmp);
+      snprintf(tmp, sizeof(tmp), "%s/%s", project_root, tx_stage_csv_path);
+      snprintf(tx_stage_csv_path, sizeof(tx_stage_csv_path), "%s", tmp);
       /* Build absolute output directory path */
       snprintf(out_dir, sizeof(out_dir), "%s/out", project_root);
   }
@@ -2324,7 +2529,7 @@ int main(int argc, char **argv) {
   int topology_sim_id; /* Output simulation slot (1–4) */
 
   /* --- Set default simulation parameters --- */
-  cfg.carrier_hz = 24.0e9;     /* 24 GHz carrier (K-band satellite) */
+      cfg.carrier_hz = 20.0e9;     /* 20 GHz carrier (K-band satellite) */
   cfg.symbol_rate_hz = 10.0e6; /* 10 MegaSymbols/sec */
   cfg.symbols = 3000;          /* 3000 symbols - reasonable run time */
   cfg.rolloff = 0.0;           /* Rectangular pulses (fastest) */
@@ -2378,6 +2583,8 @@ int main(int argc, char **argv) {
       }
     } else if (strcmp(argv[i], "--stage-csv") == 0 && i + 1 < argc) {
       snprintf(stage_csv_path, sizeof(stage_csv_path), "%s", argv[++i]);
+    } else if (strcmp(argv[i], "--tx-csv") == 0 && i + 1 < argc) {
+      snprintf(tx_stage_csv_path, sizeof(tx_stage_csv_path), "%s", argv[++i]);
     } else if (strcmp(argv[i], "--topology-sim") == 0 && i + 1 < argc) {
       if (parse_i32(argv[++i], &topology_sim_id) != 0 || topology_sim_id < 1 ||
           topology_sim_id > TOPOLOGY_SIM_COUNT) {
@@ -2432,12 +2639,24 @@ int main(int argc, char **argv) {
   char realistic_csv_dir[256];
   char realistic_const_dir[256];
   char realistic_trace_dir[256];
-  if (snprintf(rf_csv_dir, sizeof(rf_csv_dir), "%s/rf_baseline/csv", out_dir) >= (int)sizeof(rf_csv_dir) ||
-      snprintf(rf_const_dir, sizeof(rf_const_dir), "%s/rf_baseline/constellations", out_dir) >= (int)sizeof(rf_const_dir) ||
-      snprintf(rf_trace_dir, sizeof(rf_trace_dir), "%s/rf_baseline/traces", out_dir) >= (int)sizeof(rf_trace_dir) ||
-      snprintf(realistic_csv_dir, sizeof(realistic_csv_dir), "%s/realistic/csv", out_dir) >= (int)sizeof(realistic_csv_dir) ||
-      snprintf(realistic_const_dir, sizeof(realistic_const_dir), "%s/realistic/constellations", out_dir) >= (int)sizeof(realistic_const_dir) ||
-      snprintf(realistic_trace_dir, sizeof(realistic_trace_dir), "%s/realistic/traces", out_dir) >= (int)sizeof(realistic_trace_dir)) {
+  char realistic_spectrum_dir[256];
+  char tx_csv_dir[256];
+  char tx_const_dir[256];
+  char tx_trace_dir[256];
+  char tx_spectrum_dir[256];
+  char rf_spectrum_dir[256];
+  if (snprintf(rf_csv_dir, sizeof(rf_csv_dir), "%s/rf_baseline/Rx/csv", out_dir) >= (int)sizeof(rf_csv_dir) ||
+      snprintf(rf_const_dir, sizeof(rf_const_dir), "%s/rf_baseline/Rx/constellations", out_dir) >= (int)sizeof(rf_const_dir) ||
+      snprintf(rf_trace_dir, sizeof(rf_trace_dir), "%s/rf_baseline/Rx/traces", out_dir) >= (int)sizeof(rf_trace_dir) ||
+      snprintf(rf_spectrum_dir, sizeof(rf_spectrum_dir), "%s/rf_baseline/Rx/spectrum", out_dir) >= (int)sizeof(rf_spectrum_dir) ||
+      snprintf(realistic_csv_dir, sizeof(realistic_csv_dir), "%s/realistic/Rx/csv", out_dir) >= (int)sizeof(realistic_csv_dir) ||
+      snprintf(realistic_const_dir, sizeof(realistic_const_dir), "%s/realistic/Rx/constellations", out_dir) >= (int)sizeof(realistic_const_dir) ||
+      snprintf(realistic_trace_dir, sizeof(realistic_trace_dir), "%s/realistic/Rx/traces", out_dir) >= (int)sizeof(realistic_trace_dir) ||
+      snprintf(realistic_spectrum_dir, sizeof(realistic_spectrum_dir), "%s/realistic/Rx/spectrum", out_dir) >= (int)sizeof(realistic_spectrum_dir) ||
+      snprintf(tx_csv_dir, sizeof(tx_csv_dir), "%s/realistic/Tx/csv", out_dir) >= (int)sizeof(tx_csv_dir) ||
+      snprintf(tx_const_dir, sizeof(tx_const_dir), "%s/realistic/Tx/constellations", out_dir) >= (int)sizeof(tx_const_dir) ||
+      snprintf(tx_trace_dir, sizeof(tx_trace_dir), "%s/realistic/Tx/traces", out_dir) >= (int)sizeof(tx_trace_dir) ||
+      snprintf(tx_spectrum_dir, sizeof(tx_spectrum_dir), "%s/realistic/Tx/spectrum", out_dir) >= (int)sizeof(tx_spectrum_dir)) {
     fprintf(stderr, "Failed to build output subdirectories\n");
     return 5;
   }
@@ -2446,9 +2665,15 @@ int main(int argc, char **argv) {
   if (clean_output_dir(rf_csv_dir) != 0 ||
       clean_output_dir(rf_const_dir) != 0 ||
       clean_output_dir(rf_trace_dir) != 0 ||
+      clean_output_dir(rf_spectrum_dir) != 0 ||
       clean_output_dir(realistic_csv_dir) != 0 ||
       clean_output_dir(realistic_const_dir) != 0 ||
-      clean_output_dir(realistic_trace_dir) != 0) {
+      clean_output_dir(realistic_trace_dir) != 0 ||
+      clean_output_dir(realistic_spectrum_dir) != 0 ||
+      clean_output_dir(tx_csv_dir) != 0 ||
+      clean_output_dir(tx_const_dir) != 0 ||
+      clean_output_dir(tx_trace_dir) != 0 ||
+      clean_output_dir(tx_spectrum_dir) != 0) {
     fprintf(
         stderr,
         "Failed to clear output directories before writing new artifacts\n");
@@ -2491,12 +2716,20 @@ int main(int argc, char **argv) {
     return 5;
   }
 
+  /* --- Load transmitter stage configuration from CSV --- */
+  memset(&tx_stage_cfg, 0, sizeof(tx_stage_cfg));
+  if (stage_models_load_csv(tx_stage_csv_path, &tx_stage_cfg, stage_err,
+                            sizeof(stage_err)) != 0) {
+    fprintf(stderr, "Warning: could not load transmitter CSV '%s' — skipping TX simulation\n",
+            tx_stage_csv_path);
+  }
+
   /* --- Load component catalog (datasheet values for IIP3/P1dB) --- */
   ComponentCatalog component_catalog;
   memset(&component_catalog, 0, sizeof(component_catalog));
   {
       const char *cat_path = resolved_stage_csv_path;
-      if (cat_path[0] == '\0') cat_path = "data_input/receiver_config.csv";
+      if (cat_path[0] == '\0') cat_path = "data_input/20ghz/receiver.csv";
       if (component_catalog_load(cat_path, &component_catalog) != 0) {
           fprintf(stderr, "Warning: could not load '%s' — cascade will use CSV values\n",
                   cat_path);
@@ -2524,7 +2757,7 @@ int main(int argc, char **argv) {
     CascadeResult    cascade_result;
     int              cascade_ret;
 
-    cascade_params.antenna_temp_k = cfg.antenna_temp_k;     /* 93 K (ASC Signal 8.1m) */
+    cascade_params.antenna_temp_k = cfg.antenna_temp_k;     /* 91 K (Viasat 13.5m @ 44° elev, Athens→SES-17) */
     cascade_params.t0_k           = cfg.t0_k;               /* 290 K */
     cascade_params.bw_hz          = B_NOISE_HZ;             /* 200 MHz */
     cascade_params.vpp_out        = 1.0;                    /* 1 Vpp */
@@ -2619,7 +2852,7 @@ int main(int argc, char **argv) {
     if (simulate_bruteforce_rf(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
                                (size_t)cfg.symbols, metrics_rf, &count_rf,
                                &final_vpp_rf, &rf_sps, &rf_fs_used, rf_csv_dir,
-                               rf_const_dir, rf_trace_dir) != 0) {
+                               rf_const_dir, rf_trace_dir, rf_spectrum_dir) != 0) {
       fprintf(stderr, "Brute-force RF simulation failed\n");
       stage_models_free(&stage_cfg);
       free(tx_symbols);
@@ -2651,7 +2884,8 @@ int main(int argc, char **argv) {
     if (simulate_realistic_rf(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
                               (size_t)cfg.symbols, metrics_realistic, &count_realistic,
                               &final_vpp_realistic, &realistic_sps, &realistic_fs_used,
-                              realistic_csv_dir, realistic_const_dir, realistic_trace_dir) != 0) {
+                              realistic_csv_dir, realistic_const_dir, realistic_trace_dir,
+                              realistic_spectrum_dir) != 0) {
       fprintf(stderr, "Realistic RF simulation failed\n");
       stage_models_free(&stage_cfg);
       free(tx_symbols);
@@ -2677,6 +2911,19 @@ int main(int argc, char **argv) {
     (void)realistic_csv_dir;
     (void)realistic_const_dir;
     (void)realistic_trace_dir;
+  }
+
+  /* --- Transmitter chain simulation --- */
+  if (tx_stage_cfg.counts[STAGE_CHAIN_BASEBAND_RX] > 0u) {
+    printf("\n  --- Transmitter chain simulation ---\n");
+    if (simulate_transmitter(&cfg, &tx_stage_cfg, constellation, 64u,
+                             tx_symbols, (size_t)cfg.symbols, &rng,
+                             tx_csv_dir, tx_const_dir, tx_trace_dir,
+                             tx_spectrum_dir) != 0) {
+      fprintf(stderr, "Transmitter simulation failed\n");
+    } else {
+      printf("  Transmitter artifacts written to %s\n", tx_const_dir);
+    }
   }
 
   /* --- Print console summary --- */
@@ -2732,6 +2979,7 @@ int main(int argc, char **argv) {
 
   /* --- Cleanup --- */
   stage_models_free(&stage_cfg);
+  stage_models_free(&tx_stage_cfg);
   free(tx_symbols);
   free(labels);
   return 0; /* Success! */

@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/PMA5-83-2W+.pdf",
+  "part_number": "PMA5-83-2W+",
+  "manufacturer": "Mini-Circuits",
+  "freq_min_hz": 10000000.0,
+  "freq_max_hz": 10000000000.0,
+  "gain_db": 17.9,
+  "nf_db": 3.5,
+  "p1db_dbm": 31.0,
+  "oip3_dbm": 43.5,
+  "iip3_dbm": 25.6,
+  "supply_voltage": "+12 V",
+  "supply_current": "400 mA",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "exact",
+    "gain_db": "table",
+    "nf_db": "exact",
+    "p1db_dbm": "exact",
+    "oip3_dbm": "exact",
+    "iip3_dbm": "estimated"
+  }
+}

@@ -36,3 +36,12 @@ matlab_output.txt
 scripts/component_config_local.py
 data_input/component_cache/
 .gitnexus
+
+# Claude cache
+.claude/
+
+# Local databases and cache
+*.db
+data_input/*.db
+push_payload.json
+

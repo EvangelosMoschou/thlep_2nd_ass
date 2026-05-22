@@ -1,0 +1,12 @@
+chain,name,gain_db,nf_db,filter_len,is_limiter,p1db_dbm,oip3_dbm,ref,enabled,component_uid,part_number,oip3_db,iip3_db,comment,stage_type,product_url
+baseband_rx,ba_00_sky13418,-0.6,0.6,1,,37.0,,out,1,,SKY13418-485LF,,66.0,auto,Switch,https://www.digikey.com/en/products/detail/skyworks-solutions-inc/SKY13418-485LF/5214215
+baseband_rx,ba_01_ae5700b1,-0.7,0.7,1,,,,out,1,,AE5700B11310,,,auto,BPF,https://www.digikey.com/en/products/detail/anatech-electronics-inc/AE5700B11310/15651758
+baseband_rx,ba_02_cmd283c3,24.0,0.6,1,,16.0,26.0,out,1,,CMD283C3,26.0,2.0,auto,LNA,https://www.digikey.com/en/products/detail/qorvo/CMD283C3/24611205
+baseband_rx,ba_03_ae5700b1,-0.7,0.7,1,,,,out,1,,AE5700B11310,,,auto,BPF,https://www.digikey.com/en/products/detail/anatech-electronics-inc/AE5700B11310/15651758
+baseband_rx,ba_04_hmc951al,0.0,2.0,1,,,,out,1,,HMC951ALP4E,,,auto,Mixer,https://www.digikey.com/en/products/detail/analog-devices-inc/HMC951ALP4E/9094979
+rf_frontend,rf_00_sky13418,-0.6,0.6,1,,37.0,,out,1,,SKY13418-485LF,,66.0,auto,Switch,https://www.digikey.com/en/products/detail/skyworks-solutions-inc/SKY13418-485LF/5214215
+rf_frontend,rf_01_ae5700b1,-0.7,0.7,1,,,,out,1,,AE5700B11310,,,auto,BPF,https://www.digikey.com/en/products/detail/anatech-electronics-inc/AE5700B11310/15651758
+rf_frontend,rf_02_cmd283c3,24.0,0.6,1,,16.0,26.0,out,1,,CMD283C3,26.0,2.0,auto,LNA,https://www.digikey.com/en/products/detail/qorvo/CMD283C3/24611205
+rf_frontend,rf_03_ae5700b1,-0.7,0.7,1,,,,out,1,,AE5700B11310,,,auto,BPF,https://www.digikey.com/en/products/detail/anatech-electronics-inc/AE5700B11310/15651758
+rf_frontend,rf_04_hmc951al,0.0,2.0,1,,,,out,1,,HMC951ALP4E,,,auto,Mixer,https://www.digikey.com/en/products/detail/analog-devices-inc/HMC951ALP4E/9094979
+rf_postmix_bb,,,,,,,,,,,,,,,

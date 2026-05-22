@@ -88,10 +88,10 @@ void cli_print_usage(const char *exe) {
   printf("  --symbol-rate <Hz>    Symbol rate in Hz (default: 1e7)\n");
   printf("  --rf-fs <Hz>          RF brute-force sample rate in Hz (default: "
          "9.6e10)\n");
-  printf("  --carrier <Hz>        Carrier frequency in Hz (default: 2.4e10)\n");
+  printf("  --carrier <Hz>        Carrier frequency in Hz (default: 2.0e10)\n");
   printf("  --snr <dB>            Input SNR in dB (default: 20)\n");
   printf("  --stage-csv <path>    Stage-model CSV file or folder (default: "
-          "data_input/receiver_config.csv)\n");
+          "data_input/20ghz/receiver.csv)\n");
   printf("  --topology-sim <1..4> Output simulation slot under "
          "out/topology_sim_N (default: 1)\n");
   printf("  --stage-sim <1..4>    Alias for --topology-sim\n");
@@ -119,7 +119,7 @@ int parse_cli_args(int argc, char **argv, CliArgs *out) {
     return 1;
 
   /* --- Set default simulation parameters --- */
-  out->carrier_hz = 24.0e9;         /* 24 GHz carrier (K-band satellite) */
+  out->carrier_hz = 20.0e9;         /* 20 GHz carrier (K-band satellite) */
   out->symbol_rate_hz = 10.0e6;     /* 10 MegaSymbols/sec */
   out->symbols = 3000;              /* 3000 symbols */
   out->input_snr_db = 20.0;         /* 20 dB input SNR */
@@ -130,7 +130,7 @@ int parse_cli_args(int argc, char **argv, CliArgs *out) {
   out->run_realistic = 1;           /* Realistic path enabled by default */
   out->topology_sim_id = 1;         /* Default output slot: topology_sim_1 */
   snprintf(out->stage_csv_path, CLI_CSV_PATH_MAX, "%s",
-            "data_input/receiver_config.csv");
+            "data_input/20ghz/receiver.csv");
 
   out->realistic_cfg.enable_lo_phase_noise = 1;
   out->realistic_cfg.enable_iq_gain_error = 1;

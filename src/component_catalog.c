@@ -121,17 +121,23 @@ int component_catalog_load(const char *path, ComponentCatalog *cat) {
             for (i = 0; i < nf; i++) {
                 normalise_header(fields[i], norm, sizeof(norm));
                 if (strcmp(norm, "componentuid") == 0)          col_uid  = i;
-                else if (strcmp(norm, "name") == 0)              col_name = i;
+                else if (strcmp(norm, "name") == 0 ||
+                         strcmp(norm, "component") == 0)        col_name = i;
                 else if (strcmp(norm, "partnumber") == 0)        col_part = i;
-                else if (strcmp(norm, "gaindb") == 0)            col_gain = i;
+                else if (strcmp(norm, "gaindb") == 0 ||
+                         strcmp(norm, "gainlossdbm") == 0)       col_gain = i;
                 else if (strcmp(norm, "noisefigured") == 0 ||
-                         strcmp(norm, "nfdb") == 0)              col_nf   = i;
+                         strcmp(norm, "nfdb") == 0 ||
+                         strcmp(norm, "noisefiguredbm") == 0)    col_nf   = i;
                 else if (strcmp(norm, "p1dbdbm") == 0 ||
-                         strcmp(norm, "p1db") == 0)              col_p1db = i;
+                         strcmp(norm, "p1db") == 0 ||
+                         strcmp(norm, "o1dbdbm") == 0)           col_p1db = i;
                 else if (strcmp(norm, "oip3db") == 0 ||
-                         strcmp(norm, "oip3") == 0)              col_oip3 = i;
+                         strcmp(norm, "oip3") == 0 ||
+                         strcmp(norm, "oip3dbm") == 0)           col_oip3 = i;
                 else if (strcmp(norm, "iip3db") == 0 ||
-                         strcmp(norm, "iip3") == 0)              col_iip3 = i;
+                         strcmp(norm, "iip3") == 0 ||
+                         strcmp(norm, "iip3dbm") == 0)           col_iip3 = i;
             }
             headers_seen = 1;
             continue; /* header row done — move to data */

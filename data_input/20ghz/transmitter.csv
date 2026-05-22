@@ -1,0 +1,12 @@
+Role,Component,Gain/Loss (dBm),Noise Figure (dBm),Phase noise (dBc/Hz),Input power (dBm),Output power (dBm),I1dB(dBm),O1dB (dBm),OIP3 (dBm)
+Mixer 1,CMD179C3,-6.5,6.5,,needs 13dBm,,10,,17
+LO 1,HMC466LP4E,,,-110,,outputs 1.5 - 4.5 dB,,,
+LO 1 AMP ,AVA-223MP+,14.8,3.7,,,,,25,35
+LO 1 Frequency Multiplier,CY3-223+,-18,,,needs 12dBm,,,,
+LO 1 AMP ,AVA-223MP+,14.8,3.7,,,,,25,35
+combiner,PDK-25R-25GSQ,-2,2,,,,,,
+LNA 1,,14.9,,,,25,,34,
+BPF 1,BFCQ-1892+,-0.95,0.95,,,,,,
+Power Amp,Ka Band GaN SSPA from 16.75 to 20.25 GHz,46,~ 30,,,46,,> 51,
+,Deployable Ka/Ku-Band Antenna,41,,,,,,,
+,K-band Link Antennas,42,,,,,,,

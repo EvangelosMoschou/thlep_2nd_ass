@@ -82,26 +82,40 @@ int ensure_output_dirs(const char *base, int topology_id) {
   /* RF baseline subdirectories */
   snprintf(sub, sizeof(sub), "%s/rf_baseline", base);
   if (ensure_dir_exists(sub) != 0) return -2;
-  snprintf(sub, sizeof(sub), "%s/rf_baseline/csv", base);
+  snprintf(sub, sizeof(sub), "%s/rf_baseline/Rx", base);
   if (ensure_dir_exists(sub) != 0) return -3;
-
-  snprintf(sub, sizeof(sub), "%s/rf_baseline/constellations", base);
+  snprintf(sub, sizeof(sub), "%s/rf_baseline/Rx/csv", base);
   if (ensure_dir_exists(sub) != 0) return -4;
-
-  snprintf(sub, sizeof(sub), "%s/rf_baseline/traces", base);
+  snprintf(sub, sizeof(sub), "%s/rf_baseline/Rx/constellations", base);
   if (ensure_dir_exists(sub) != 0) return -5;
+  snprintf(sub, sizeof(sub), "%s/rf_baseline/Rx/traces", base);
+  if (ensure_dir_exists(sub) != 0) return -6;
+  snprintf(sub, sizeof(sub), "%s/rf_baseline/Rx/spectrum", base);
+  if (ensure_dir_exists(sub) != 0) return -7;
 
   /* Realistic impairment subdirectories */
   snprintf(sub, sizeof(sub), "%s/realistic", base);
-  if (ensure_dir_exists(sub) != 0) return -6;
-  snprintf(sub, sizeof(sub), "%s/realistic/csv", base);
-  if (ensure_dir_exists(sub) != 0) return -7;
-
-  snprintf(sub, sizeof(sub), "%s/realistic/constellations", base);
   if (ensure_dir_exists(sub) != 0) return -8;
-
-  snprintf(sub, sizeof(sub), "%s/realistic/traces", base);
+  snprintf(sub, sizeof(sub), "%s/realistic/Rx", base);
   if (ensure_dir_exists(sub) != 0) return -9;
+  snprintf(sub, sizeof(sub), "%s/realistic/Rx/csv", base);
+  if (ensure_dir_exists(sub) != 0) return -10;
+  snprintf(sub, sizeof(sub), "%s/realistic/Rx/constellations", base);
+  if (ensure_dir_exists(sub) != 0) return -11;
+  snprintf(sub, sizeof(sub), "%s/realistic/Rx/traces", base);
+  if (ensure_dir_exists(sub) != 0) return -12;
+  snprintf(sub, sizeof(sub), "%s/realistic/Rx/spectrum", base);
+  if (ensure_dir_exists(sub) != 0) return -13;
+  snprintf(sub, sizeof(sub), "%s/realistic/Tx", base);
+  if (ensure_dir_exists(sub) != 0) return -14;
+  snprintf(sub, sizeof(sub), "%s/realistic/Tx/csv", base);
+  if (ensure_dir_exists(sub) != 0) return -15;
+  snprintf(sub, sizeof(sub), "%s/realistic/Tx/constellations", base);
+  if (ensure_dir_exists(sub) != 0) return -16;
+  snprintf(sub, sizeof(sub), "%s/realistic/Tx/traces", base);
+  if (ensure_dir_exists(sub) != 0) return -17;
+  snprintf(sub, sizeof(sub), "%s/realistic/Tx/spectrum", base);
+  if (ensure_dir_exists(sub) != 0) return -18;
 
   return 0;
 }

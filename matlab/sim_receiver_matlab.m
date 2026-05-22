@@ -99,7 +99,7 @@ sig_in = tx_sig * sqrt(P_sig_in_W * R_load_ohm);
 %   LO_2_01 -> MIX 2
 pn_mix1_dbchz = -Inf;
 pn_mix2_dbchz = -Inf;
-catalog_path = fullfile('..', 'data_input', 'receiver_config.csv');
+catalog_path = fullfile('..', 'data_input', '20ghz', 'receiver.csv');
 
 if exist(catalog_path, 'file')
     try

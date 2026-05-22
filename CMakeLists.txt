@@ -40,6 +40,7 @@ set(SOURCES
     src/output_mgr.c
     src/signal_chain.c
     src/sim_baseband.c
+    src/fft.c
 )
 
 # ── Target ────────────────────────────────────────────────────────────────────

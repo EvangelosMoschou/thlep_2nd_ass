@@ -80,6 +80,9 @@ typedef struct StageModel {
 
     /** Butterworth filter order (2, 4, 6). 0 = use legacy filter_len. */
     int filter_order;
+
+    /** LO frequency in Hz for mixer stages. 0 = no frequency mixing. */
+    double lo_hz;
 } StageModel;
 
 /** @brief Number of distinct receiver stage chains (matches the StageChainId enum count). */

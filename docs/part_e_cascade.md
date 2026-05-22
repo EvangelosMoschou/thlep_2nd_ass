@@ -146,7 +146,7 @@ be adjusted to close it:
 |-------|---------|--------|--------|
 | Ground antenna gain | 40 dBi | 50–55 dBi | +10–15 dB margin |
 | Rain rate | 10 mm/h | 5 mm/h (dry region) | −~6 dB loss |
-| Elevation angle | 30° | 60° (higher) | shorter slant path |
+| Elevation angle | 44° | Athens→SES-17 |
 | Bandwidth | 200 MHz | 100 MHz | −3 dB noise floor |
 | Modulation | 64-APSK | 16-APSK | −6 dB SNR required |
 | Added LNA gain | 29 dB | 35 dB | reduces cascade NF |
@@ -205,7 +205,7 @@ ComponentCatalog catalog;
 component_catalog_load("data/component_catalog.csv", &catalog);
 
 CascadeParams params = {
-    .antenna_temp_k    = 150.0,
+    .antenna_temp_k    = 91.0,
     .t0_k              = 290.0,
     .bw_hz             = 200.0e6,
     .vpp_out           = 1.0,

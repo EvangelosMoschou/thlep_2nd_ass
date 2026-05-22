@@ -25,7 +25,7 @@
  *   @code
  *   CascadeResult result;
  *   CascadeParams params = {
- *       .antenna_temp_k = 150.0,
+ *       .antenna_temp_k = 91.0,
  *       .t0_k           = 290.0,
  *       .bw_hz          = 200.0e6,
  *       .vpp_out        = 1.0,
@@ -43,7 +43,7 @@
  * ============================================================================ */
 
 typedef struct CascadeParams {
-    double antenna_temp_k;   /**< Antenna equivalent noise temperature [K]  (150 K) */
+    double antenna_temp_k;   /**< Antenna equivalent noise temperature [K]  (91 K) */
     double t0_k;             /**< Reference temperature [K]                  (290 K) */
     double bw_hz;            /**< Receiver bandwidth [Hz]                    (200 MHz) */
     double vpp_out;          /**< Target output voltage peak-to-peak [V]     (1.0 V) */
@@ -75,6 +75,7 @@ typedef struct CascadeResult {
     double si_dbm;                 /**< Input signal power [dBm] */
     double pout_dbm;               /**< Target output power [dBm] */
     double total_required_gain_db; /**< Gain needed for 1 Vpp output [dB] */
+    double antenna_temp_k;         /**< Antenna temp used for Ni calc [K] */
 
     /* --- Cascade summary --- */
     int    num_stages;             /**< Number of stages in chain */

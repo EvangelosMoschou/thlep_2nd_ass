@@ -172,6 +172,7 @@ int compute_cascade(const StageModelsConfig *stage_cfg,
     result->si_dbm = Si_dBm;
     result->pout_dbm = Pout_dBm;
     result->total_required_gain_db = Pout_dBm - Si_dBm;
+    result->antenna_temp_k = params->antenna_temp_k;
 
     /* -----------------------------------------------------------------------
      * 2. FRIIS NOISE CASCADE + IIP3 CASCADE
@@ -344,7 +345,7 @@ void print_cascade(const CascadeResult *r) {
     /* --- System power requirements --- */
     printf("\n  --- System Power Requirements ---\n");
     printf("  Input noise (Ni, T_ant=%.0f K):     %8.2f  dBm\n",
-           (double)(150), r->ni_dbm);
+           r->antenna_temp_k, r->ni_dbm);
     printf("  Input signal (Si, SNR=%.1f dB):     %8.2f  dBm\n",
            r->si_dbm - r->ni_dbm, r->si_dbm);
     printf("  Target output (%.2f Vpp, 50 Ω):     %8.2f  dBm\n",
