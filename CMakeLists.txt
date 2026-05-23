@@ -42,6 +42,7 @@ set(SOURCES
     src/sim_baseband.c
     src/fft.c
     src/soa_utils.c
+    src/spectrum.c
 )
 
 # ── Target ────────────────────────────────────────────────────────────────────

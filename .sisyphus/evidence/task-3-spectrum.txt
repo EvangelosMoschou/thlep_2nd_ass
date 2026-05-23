@@ -1,0 +1,22 @@
+Task 3: Extract spectrum visualization helpers from main.c
+============================================================
+
+Verification Steps:
+1. Created include/spectrum.h and src/spectrum.c with:
+   - write_stage_spectrum()
+2. Removed local definition of write_stage_spectrum() from src/main.c.
+3. Included "spectrum.h" in src/main.c.
+4. Updated Makefile and CMakeLists.txt to compile and link spectrum.c.
+5. Successfully compiled the codebase:
+   $ make clean && make
+   exit code: 0, zero warnings
+6. Ran the simulation scenario:
+   $ ./run.sh --seed 42 --symbols 3000
+   exit code: 0
+7. Verified output parity against baseline:
+   $ diff out/rf_baseline/Rx/csv/rf_metrics.csv baseline_out/rf_baseline/Rx/csv/rf_metrics.csv
+   $ diff out/realistic/Rx/csv/realistic_metrics.csv baseline_out/realistic/Rx/csv/realistic_metrics.csv
+   Result: 100% identical outputs.
+8. Verified spectrum SVGs count:
+   $ ls out/rf_baseline/Rx/spectrum/*.svg | wc -l
+   Result: 14 (matches exactly)
