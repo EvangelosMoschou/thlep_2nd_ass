@@ -2,6 +2,7 @@
 #define FFT_H
 
 #include <stddef.h>
+#include "sim_types.h"
 
 /*
  * fft_spectrum_dB - Compute single-sided power spectrum in dB.
@@ -43,5 +44,43 @@ int fft_complex_spectrum_dB(const double *re, const double *im,
                             size_t n, double fs_hz,
                             double *freq_out, double *mag_dB_out,
                             size_t max_bins);
+
+/*
+ * next_pow2 - Find the next power of 2 >= n
+ */
+size_t next_pow2(size_t n);
+
+/*
+ * bitrev - Compute bit-reversed index
+ */
+size_t bitrev(size_t x, size_t bits);
+
+/*
+ * simple_fft - In-place Cooley-Tukey FFT using precomputed twiddles.
+ * N must be a power of 2.
+ */
+void simple_fft(Complex *x, size_t N);
+
+/*
+ * simple_ifft - In-place inverse FFT.
+ */
+void simple_ifft(Complex *X, size_t N);
+
+/*
+ * fft_convolve_complex - FFT-based convolution for complex signals.
+ */
+void fft_convolve_complex(const Complex *restrict a, size_t n_a,
+                          const double *b_real, size_t n_b,
+                          Complex *restrict out, size_t out_len);
+
+/*
+ * fft_init - Precompute/initialize twiddle factors for FFTs up to size N.
+ */
+void fft_init(size_t n);
+
+/*
+ * fft_free - Free resources allocated for twiddle factors.
+ */
+void fft_free(void);
 
 #endif /* FFT_H */

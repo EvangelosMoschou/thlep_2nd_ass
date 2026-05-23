@@ -154,3 +154,144 @@ int fft_complex_spectrum_dB(const double *re, const double *im,
     free(buf);
     return (int)wi;
 }
+
+static double *twiddles_re = NULL;
+static double *twiddles_im = NULL;
+static size_t twiddles_max_size = 0;
+
+void fft_init(size_t n) {
+    if (n <= twiddles_max_size) return;
+
+    size_t new_size = 1;
+    while (new_size < n) new_size <<= 1;
+
+    double *new_re = (double *)realloc(twiddles_re, (new_size / 2) * sizeof(double));
+    double *new_im = (double *)realloc(twiddles_im, (new_size / 2) * sizeof(double));
+    if (!new_re || !new_im) {
+        if (new_re) twiddles_re = new_re;
+        if (new_im) twiddles_im = new_im;
+        return;
+    }
+    twiddles_re = new_re;
+    twiddles_im = new_im;
+
+    for (size_t i = 0; i < new_size / 2; i++) {
+        double angle = -2.0 * M_PI * (double)i / (double)new_size;
+        twiddles_re[i] = cos(angle);
+        twiddles_im[i] = sin(angle);
+    }
+    twiddles_max_size = new_size;
+}
+
+void fft_free(void) {
+    free(twiddles_re);
+    free(twiddles_im);
+    twiddles_re = NULL;
+    twiddles_im = NULL;
+    twiddles_max_size = 0;
+}
+
+size_t next_pow2(size_t n) {
+    size_t p = 1;
+    while (p < n) p <<= 1;
+    return p;
+}
+
+size_t bitrev(size_t x, size_t bits) {
+    size_t rev = 0;
+    for (size_t i = 0; i < bits; ++i) {
+        rev = (rev << 1) | (x & 1);
+        x >>= 1;
+    }
+    return rev;
+}
+
+void simple_fft(Complex *x, size_t N) {
+    size_t bits = 0;
+    size_t tmp = N;
+    while (tmp > 1) { bits++; tmp >>= 1; }
+
+    for (size_t i = 0; i < N; ++i) {
+        size_t j = bitrev(i, bits);
+        if (i < j) {
+            double re = x[i].re;
+            double im = x[i].im;
+            x[i].re = x[j].re;
+            x[i].im = x[j].im;
+            x[j].re = re;
+            x[j].im = im;
+        }
+    }
+
+    fft_init(N);
+
+    for (size_t size = 2; size <= N; size <<= 1) {
+        size_t step = twiddles_max_size / size;
+        for (size_t i = 0; i < N; i += size) {
+            for (size_t j = 0; j < size / 2; ++j) {
+                size_t idx1 = i + j;
+                size_t idx2 = idx1 + size / 2;
+
+                double w_re = twiddles_re[j * step];
+                double w_im = twiddles_im[j * step];
+
+                double t_re = x[idx2].re * w_re - x[idx2].im * w_im;
+                double t_im = x[idx2].re * w_im + x[idx2].im * w_re;
+
+                x[idx2].re = x[idx1].re - t_re;
+                x[idx2].im = x[idx1].im - t_im;
+                x[idx1].re += t_re;
+                x[idx1].im += t_im;
+            }
+        }
+    }
+}
+
+void simple_ifft(Complex *X, size_t N) {
+    for (size_t i = 0; i < N; ++i) {
+        X[i].im = -X[i].im;
+    }
+    simple_fft(X, N);
+    for (size_t i = 0; i < N; ++i) {
+        X[i].re /= (double)N;
+        X[i].im /= (double)N;
+    }
+}
+
+void fft_convolve_complex(const Complex *restrict a, size_t n_a,
+                          const double *b_real, size_t n_b,
+                          Complex *restrict out, size_t out_len) {
+    size_t result_len = n_a + n_b - 1;
+    size_t fft_size = next_pow2(result_len);
+
+    Complex *A = (Complex *)calloc(fft_size, sizeof(Complex));
+    Complex *B = (Complex *)calloc(fft_size, sizeof(Complex));
+    if (!A || !B) {
+        if (A) free(A);
+        if (B) free(B);
+        return;
+    }
+
+    for (size_t i = 0; i < n_a; ++i) A[i] = a[i];
+    for (size_t i = 0; i < n_b; ++i) { B[i].re = b_real[i]; B[i].im = 0.0; }
+
+    simple_fft(A, fft_size);
+    simple_fft(B, fft_size);
+
+    for (size_t i = 0; i < fft_size; ++i) {
+        double re = A[i].re * B[i].re - A[i].im * B[i].im;
+        double im = A[i].re * B[i].im + A[i].im * B[i].re;
+        A[i].re = re;
+        A[i].im = im;
+    }
+
+    simple_ifft(A, fft_size);
+
+    for (size_t i = 0; i < out_len; ++i) {
+        out[i].re = A[i].re;
+        out[i].im = A[i].im;
+    }
+
+    free(A);
+    free(B);
+}
