@@ -43,6 +43,7 @@ set(SOURCES
     src/fft.c
     src/soa_utils.c
     src/spectrum.c
+    src/perf_timer.c
 )
 
 # ── Target ────────────────────────────────────────────────────────────────────

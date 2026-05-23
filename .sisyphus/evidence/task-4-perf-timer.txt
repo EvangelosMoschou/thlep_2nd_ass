@@ -1,0 +1,32 @@
+Task 4: Implement timing infrastructure (perf_timer.c/.h)
+===========================================================
+
+Verification Steps:
+1. Created include/perf_timer.h and src/perf_timer.c containing:
+   - perf_timer_start()
+   - perf_timer_stop()
+   - perf_timer_elapsed_ms()
+   - perf_timer_report()
+   - Educational notes documenting:
+     * Wall-clock time (physical time using CLOCK_MONOTONIC).
+     * CPU time (thread cumulative user/system time).
+     * Why clock() is unsuitable for benchmarking multi-threaded applications (measures sum of all threads CPU time).
+     * Why CLOCK_MONOTONIC is preferred (immune to system NTP adjustments).
+2. Added timer declarations in src/main.c.
+3. Wrapped complex baseband, RF brute-force, and realistic RF paths with perf_timer_start/stop calls.
+4. Added the PERFORMANCE TIMING SUMMARY report printout at the end of the simulation run.
+5. Successfully compiled the codebase:
+   $ make clean && make
+   exit code: 0, zero warnings
+6. Ran the simulation scenario:
+   $ ./run.sh --seed 42 --symbols 3000
+   exit code: 0
+   Output:
+   === PERFORMANCE TIMING SUMMARY ===
+     RF Brute-Force Path       :   23257.60 ms (   129.0 symbols/sec)
+     Realistic RF Path         :   23259.57 ms (   129.0 symbols/sec)
+   ==================================
+7. Verified output parity against baseline:
+   $ diff out/rf_baseline/Rx/csv/rf_metrics.csv baseline_out/rf_baseline/Rx/csv/rf_metrics.csv
+   $ diff out/realistic/Rx/csv/realistic_metrics.csv baseline_out/realistic/Rx/csv/realistic_metrics.csv
+   Result: 100% identical outputs.

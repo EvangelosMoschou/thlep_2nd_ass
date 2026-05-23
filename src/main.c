@@ -39,6 +39,7 @@
 #include "fft.h"
 #include "soa_utils.h"
 #include "spectrum.h"
+#include "perf_timer.h"
 
 /* --- Propagation analysis (Part D: FSPL, rain, fog, gas, link margin) --- */
 #include "propagation.h"
@@ -2558,6 +2559,9 @@ int main(int argc, char **argv) {
   StageMetric metrics_bb[MAX_METRICS]; /* Baseband path metrics */
   StageMetric metrics_rf[MAX_METRICS]; /* RF path metrics */
   StageMetric metrics_realistic[MAX_METRICS]; /* Realistic path metrics */
+  PerfTimer timer_bb;
+  PerfTimer timer_rf;
+  PerfTimer timer_realistic;
   size_t count_bb = 0u;                /* Number of baseband metrics */
   size_t count_rf = 0u;                /* Number of RF metrics */
   size_t count_realistic = 0u;         /* Number of realistic metrics */
@@ -2879,6 +2883,7 @@ int main(int argc, char **argv) {
   if (cfg.run_bb) {
     SimBasebandResult bb_result;
     memset(&bb_result, 0, sizeof(bb_result));
+    perf_timer_start(&timer_bb);
     if (simulate_baseband(&cfg, &stage_cfg, constellation, 64u,
                           tx_symbols, (size_t)cfg.symbols, &rng, &bb_result,
                           rf_csv_dir, rf_const_dir, rf_trace_dir) != 0) {
@@ -2888,6 +2893,7 @@ int main(int argc, char **argv) {
       free(labels);
       return 6;
     }
+    perf_timer_stop(&timer_bb);
     memcpy(metrics_bb, bb_result.metrics, bb_result.count * sizeof(StageMetric));
     count_bb = bb_result.count;
     final_vpp_bb = bb_result.final_vpp;
@@ -2898,6 +2904,7 @@ int main(int argc, char **argv) {
   }
 
   if (cfg.run_rf) {
+    perf_timer_start(&timer_rf);
     if (simulate_bruteforce_rf(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
                                (size_t)cfg.symbols, metrics_rf, &count_rf,
                                &final_vpp_rf, &rf_sps, &rf_fs_used, rf_csv_dir,
@@ -2908,6 +2915,7 @@ int main(int argc, char **argv) {
       free(labels);
       return 7;
     }
+    perf_timer_stop(&timer_rf);
 
     {
       char rf_metrics_path[512];
@@ -2930,6 +2938,7 @@ int main(int argc, char **argv) {
   }
 
   if (cfg.run_realistic) {
+    perf_timer_start(&timer_realistic);
     if (simulate_realistic_rf(&cfg, &stage_cfg, tx_symbols, constellation, 64u,
                               (size_t)cfg.symbols, metrics_realistic, &count_realistic,
                               &final_vpp_realistic, &realistic_sps, &realistic_fs_used,
@@ -2941,6 +2950,7 @@ int main(int argc, char **argv) {
       free(labels);
       return 9;
     }
+    perf_timer_stop(&timer_realistic);
 
     {
       char realistic_metrics_path[512];
@@ -3021,6 +3031,12 @@ int main(int argc, char **argv) {
       }
     }
   }
+
+  printf("\n=== PERFORMANCE TIMING SUMMARY ===\n");
+  if (cfg.run_bb) perf_timer_report("Complex Baseband Path", &timer_bb, (size_t)cfg.symbols);
+  if (cfg.run_rf) perf_timer_report("RF Brute-Force Path", &timer_rf, (size_t)cfg.symbols);
+  if (cfg.run_realistic) perf_timer_report("Realistic RF Path", &timer_realistic, (size_t)cfg.symbols);
+  printf("==================================\n");
 
   printf("\nOutputs written under ./out/\n");
   printf("Generated files strictly follow the assignment requirements (Trace, "
