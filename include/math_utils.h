@@ -68,4 +68,34 @@ static inline double lin_to_db(double x_lin) {
     return 10.0 * log10(x_lin);
 }
 
+/* Branch prediction optimization macros */
+#if defined(__GNUC__) || defined(__clang__)
+#define LIKELY(x)      __builtin_expect(!!(x), 1)
+#define UNLIKELY(x)    __builtin_expect(!!(x), 0)
+#else
+#define LIKELY(x)      (x)
+#define UNLIKELY(x)    (x)
+#endif
+
+/* Software cache prefetching macro */
+#if defined(__GNUC__) || defined(__clang__)
+#define PREFETCH(addr, rw, locality) __builtin_prefetch(addr, rw, locality)
+#else
+#define PREFETCH(addr, rw, locality) ((void)0)
+#endif
+
+/* Portable loop unrolling pragmas */
+#if defined(__clang__)
+#define UNROLL_LOOP_COUNT(n) _Pragma("clang loop unroll_count(n)")
+#define UNROLL_LOOP_ENABLE   _Pragma("clang loop unroll(enable)")
+#elif defined(__GNUC__) && (__GNUC__ >= 8)
+#define STRINGIFY_VAL(x) #x
+#define TOSTRING_VAL(x) STRINGIFY_VAL(x)
+#define UNROLL_LOOP_COUNT(n) _Pragma(TOSTRING_VAL(GCC unroll n))
+#define UNROLL_LOOP_ENABLE   _Pragma("GCC unroll 4")
+#else
+#define UNROLL_LOOP_COUNT(n)
+#define UNROLL_LOOP_ENABLE
+#endif
+
 #endif /* MATH_UTILS_H */

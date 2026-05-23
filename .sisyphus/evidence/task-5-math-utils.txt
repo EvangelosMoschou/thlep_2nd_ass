@@ -1,0 +1,19 @@
+Task 5: Add portable optimization macros to math_utils.h
+==========================================================
+
+Verification Steps:
+1. Updated include/math_utils.h to add:
+   - LIKELY(x) and UNLIKELY(x) branch prediction macros.
+   - PREFETCH(addr, rw, locality) software cache prefetching macro.
+   - UNROLL_LOOP_COUNT(n) and UNROLL_LOOP_ENABLE loop unrolling macros.
+2. Verified all macros have fallback definitions for non-GCC/Clang compilers (e.g. MSVC).
+3. Successfully performed a clean rebuild of the codebase:
+   $ make clean && make
+   exit code: 0, zero warnings
+4. Ran the simulation scenario:
+   $ ./run.sh --seed 42 --symbols 3000
+   exit code: 0
+5. Verified output parity against baseline:
+   $ diff out/rf_baseline/Rx/csv/rf_metrics.csv baseline_out/rf_baseline/Rx/csv/rf_metrics.csv
+   $ diff out/realistic/Rx/csv/realistic_metrics.csv baseline_out/realistic/Rx/csv/realistic_metrics.csv
+   Result: 100% identical outputs.
