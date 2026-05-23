@@ -1,0 +1,20 @@
+Task 1: Consolidate FFT implementations and improve algorithm
+============================================================
+
+Verification Steps:
+1. Compiled the project successfully:
+   $ make clean && make
+   exit code: 0, zero warnings
+
+2. Ran the simulation using seed 42 and 3000 symbols:
+   $ ./run.sh --seed 42 --symbols 3000
+   exit code: 0
+
+3. Verified numerical bit-parity of output metrics with baseline:
+   $ diff out/rf_baseline/Rx/csv/rf_metrics.csv baseline_out/rf_baseline/Rx/csv/rf_metrics.csv
+   $ diff out/realistic/Rx/csv/realistic_metrics.csv baseline_out/realistic/Rx/csv/realistic_metrics.csv
+   Result: 100% identical outputs.
+
+4. Verified stage output:
+   $ diff out/rf_baseline/Rx/csv/receiver_stage_12_zhl_20w_13swx.csv baseline_out/rf_baseline/Rx/csv/receiver_stage_12_zhl_20w_13swx.csv
+   Result: 100% identical outputs.
