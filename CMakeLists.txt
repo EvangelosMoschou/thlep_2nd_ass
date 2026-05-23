@@ -41,6 +41,7 @@ set(SOURCES
     src/signal_chain.c
     src/sim_baseband.c
     src/fft.c
+    src/soa_utils.c
 )
 
 # ── Target ────────────────────────────────────────────────────────────────────

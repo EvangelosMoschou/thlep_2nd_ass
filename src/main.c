@@ -37,6 +37,7 @@
 #include "stage_artifacts.h"
 #include "stage_models.h"
 #include "fft.h"
+#include "soa_utils.h"
 
 /* Write spectrum SVG for a real-valued signal within a frequency window.
  * center_hz and span_hz define the display window; bins outside are filtered. */
@@ -627,14 +628,9 @@ static size_t synchronize_and_downsample(const Complex *bb_stream, size_t n_in,
  * ============================================================================
  */
 
-static void pack_complex(const double *restrict re, const double *restrict im,
-                         size_t n, Complex *restrict dst) {
-  size_t i;
-  for (i = 0; i < n; ++i) {
-    dst[i].re = re[i];
-    dst[i].im = im[i];
-  }
-}
+/*
+ * pack_complex is now imported from soa_utils.h
+ */
 
 /* --- SoA elemental operations --- */
 
