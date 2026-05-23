@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/TGA2567-SM.pdf",
+  "part_number": "TGA2567-SM",
+  "manufacturer": "Qorvo",
+  "freq_min_hz": 2000000000.0,
+  "freq_max_hz": 20000000000.0,
+  "gain_db": 17.0,
+  "nf_db": 2.0,
+  "p1db_dbm": 19.0,
+  "oip3_dbm": 29.0,
+  "iip3_dbm": 12.0,
+  "supply_voltage": null,
+  "supply_current": "100 mA",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "exact",
+    "gain_db": "exact",
+    "nf_db": "exact",
+    "p1db_dbm": "table",
+    "oip3_dbm": "exact",
+    "iip3_dbm": "estimated"
+  }
+}

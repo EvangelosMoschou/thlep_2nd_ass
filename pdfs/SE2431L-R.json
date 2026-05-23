@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/SE2431L-R.pdf",
+  "part_number": "SE2431L-R",
+  "manufacturer": "Skyworks",
+  "freq_min_hz": null,
+  "freq_max_hz": null,
+  "gain_db": 19.0,
+  "nf_db": 2.0,
+  "p1db_dbm": 15.0,
+  "oip3_dbm": 25.0,
+  "iip3_dbm": 6.0,
+  "supply_voltage": null,
+  "supply_current": "3. A",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "not_found",
+    "gain_db": "table",
+    "nf_db": "exact",
+    "p1db_dbm": "exact",
+    "oip3_dbm": "estimated",
+    "iip3_dbm": "estimated"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/CMD298C4.pdf",
+  "part_number": "CMD298C4",
+  "manufacturer": "Qorvo",
+  "freq_min_hz": 17000000000.0,
+  "freq_max_hz": 25000000000.0,
+  "gain_db": 27.0,
+  "nf_db": 1.4,
+  "p1db_dbm": 8.0,
+  "oip3_dbm": 19.0,
+  "iip3_dbm": -8.0,
+  "supply_voltage": null,
+  "supply_current": "27 mA",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "exact",
+    "gain_db": "exact",
+    "nf_db": "exact",
+    "p1db_dbm": "exact",
+    "oip3_dbm": "exact",
+    "iip3_dbm": "estimated"
+  }
+}

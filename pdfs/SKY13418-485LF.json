@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/SKY13418-485LF.pdf",
+  "part_number": "SKY13418-485LF",
+  "manufacturer": "Skyworks",
+  "freq_min_hz": 100000000.0,
+  "freq_max_hz": 6000000000.0,
+  "gain_db": null,
+  "nf_db": null,
+  "p1db_dbm": null,
+  "oip3_dbm": null,
+  "iip3_dbm": null,
+  "supply_voltage": null,
+  "supply_current": null,
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "exact",
+    "gain_db": "not_found",
+    "nf_db": "not_found",
+    "p1db_dbm": "not_found",
+    "oip3_dbm": "not_found",
+    "iip3_dbm": "not_found"
+  }
+}

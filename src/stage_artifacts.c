@@ -2069,6 +2069,7 @@ int write_spectrum_svg(const char* path, const double* freq_hz, const double* ma
     double y_max = ceil(max_mag / 10.0) * 10.0 + 10.0;
     double y_min = floor(min_mag / 10.0) * 10.0 - 10.0;
     if (y_max - y_min < 80.0) y_min = y_max - 80.0;  /* ensure min 80 dB range */
+    if (y_max - y_min > 100.0) y_min = y_max - 100.0;
     const double y_span = y_max - y_min;
     const double y_scale = plot_h / y_span;
 

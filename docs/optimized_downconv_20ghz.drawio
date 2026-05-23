@@ -1,0 +1,125 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mxfile host="app.diagrams.net" agent="Mozilla/5.0">
+  <diagram name="Page-1" id="chain-diagram">
+    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1"
+      connect="1" arrows="1" fold="1" pageScale="1"
+      pageWidth="1120" pageHeight="700" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+  <mxCell id="e1" value="" style="endArrow=none;html=1;rounded=0;endArrow=none;" edge="1" parent="1">
+    <mxGeometry height="50" relative="1" width="50" as="geometry">
+      <mxPoint x="110" y="330" as="sourcePoint" />
+      <mxPoint x="110" y="280" as="targetPoint" />
+    </mxGeometry>
+  </mxCell>
+  <mxCell id="e2" value="" style="endArrow=none;html=1;rounded=0;endArrow=none;" edge="1" parent="1">
+    <mxGeometry height="50" relative="1" width="50" as="geometry">
+      <mxPoint x="110" y="280" as="sourcePoint" />
+      <mxPoint x="90" y="260" as="targetPoint" />
+    </mxGeometry>
+  </mxCell>
+  <mxCell id="e3" value="" style="endArrow=none;html=1;rounded=0;endArrow=none;" edge="1" parent="1">
+    <mxGeometry height="50" relative="1" width="50" as="geometry">
+      <mxPoint x="110" y="280" as="sourcePoint" />
+      <mxPoint x="130" y="260" as="targetPoint" />
+    </mxGeometry>
+  </mxCell>
+  <mxCell id="c4" value="Antenna
+40 dBi" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="85" y="240" width="50" height="35" as="geometry" />
+  </mxCell>
+  <mxCell id="c5" value="" style="ellipse;strokeColor=none;fillColor=none;" vertex="1" parent="1">
+    <mxGeometry x="108" y="328" width="4" height="4" as="geometry" />
+  </mxCell>
+  <mxCell id="c6" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#000000;overflow=hidden;" vertex="1" parent="1">
+    <mxGeometry x="160" y="280" width="110" height="70" as="geometry" />
+  </mxCell>
+  <mxCell id="c7" value="MA4AGSW1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="165" y="290" width="100" height="25" as="geometry" />
+  </mxCell>
+  <mxCell id="c8" value="IL=0.3dB  NF=0.3dB" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="160" y="355" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="c9" value="Switch" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="160" y="258" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="e10" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="c5" target="c6">
+    <mxGeometry relative="1" as="geometry" />
+  </mxCell>
+  <mxCell id="c11" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#000000;overflow=hidden;" vertex="1" parent="1">
+    <mxGeometry x="310" y="280" width="110" height="70" as="geometry" />
+  </mxCell>
+  <mxCell id="c12" value="&lt;a href=&quot;https://www.digikey.com/en/products/detail/anatech-electronics-inc/AE20500B11422/15652127&quot;&gt;AE20500B11422&lt;/a&gt;" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="315" y="290" width="100" height="25" as="geometry" />
+  </mxCell>
+  <mxCell id="c13" value="IL=1.6dB  NF=1.6dB" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="310" y="355" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="c14" value="BPF" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="310" y="258" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="e15" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="c6" target="c11">
+    <mxGeometry relative="1" as="geometry" />
+  </mxCell>
+  <mxCell id="c16" value="" style="triangle;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#000000;overflow=hidden;" vertex="1" parent="1">
+    <mxGeometry x="460" y="280" width="110" height="70" as="geometry" />
+  </mxCell>
+  <mxCell id="c17" value="&lt;a href=&quot;https://www.digikey.com/en/products/detail/qorvo/QPA2735D/24718706&quot;&gt;QPA2735D&lt;/a&gt;" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="465" y="295" width="100" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="c18" value="G=26.0dB  NF=1.2dB" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="460" y="355" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="c19" value="LNA" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="460" y="258" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="e20" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="c11" target="c16">
+    <mxGeometry relative="1" as="geometry" />
+  </mxCell>
+  <mxCell id="c21" value="" style="triangle;whiteSpace=wrap;html=1;rotation=-90;fillColor=#ffe6cc;strokeColor=#000000;overflow=hidden;" vertex="1" parent="1">
+    <mxGeometry x="610" y="295" width="110" height="55" as="geometry" />
+  </mxCell>
+  <mxCell id="c22" value="LO 1" style="ellipse;whiteSpace=wrap;html=1;aspect=fixed;" vertex="1" parent="1">
+    <mxGeometry x="635.0" y="210" width="60" height="60" as="geometry" />
+  </mxCell>
+  <mxCell id="e23" style="endArrow=none;html=1;rounded=0;" edge="1" parent="1" source="c22" target="c21">
+    <mxGeometry relative="1" as="geometry" />
+  </mxCell>
+  <mxCell id="c24" value="&lt;a href=&quot;https://www.digikey.com/en/products/detail/analog-devices-inc/HMC966LP4E/3985183&quot;&gt;HMC966LP4E&lt;/a&gt;" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="625" y="302" width="80" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="c25" value="G=14.0dB  NF=2.5dB" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="610" y="345" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="e26" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="c16" target="c21">
+    <mxGeometry relative="1" as="geometry" />
+  </mxCell>
+  <mxCell id="c27" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#000000;overflow=hidden;" vertex="1" parent="1">
+    <mxGeometry x="760" y="280" width="110" height="70" as="geometry" />
+  </mxCell>
+  <mxCell id="c28" value="&lt;a href=&quot;https://www.digikey.com/en/products/detail/anatech-electronics-inc/AB2535B861/15652259&quot;&gt;AB2535B861&lt;/a&gt;" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="765" y="290" width="100" height="25" as="geometry" />
+  </mxCell>
+  <mxCell id="c29" value="IL=1.0dB  NF=1.0dB" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="760" y="355" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="c30" value="BPF" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="760" y="258" width="110" height="20" as="geometry" />
+  </mxCell>
+  <mxCell id="e31" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="c21" target="c27">
+    <mxGeometry relative="1" as="geometry" />
+  </mxCell>
+  <mxCell id="c32" value="ADC" style="rounded=1;whiteSpace=wrap;html=1;" vertex="1" parent="1">
+    <mxGeometry x="910" y="280" width="110" height="70" as="geometry" />
+  </mxCell>
+  <mxCell id="e33" style="endArrow=block;html=1;rounded=0;" edge="1" parent="1" source="c27" target="c32">
+    <mxGeometry relative="1" as="geometry" />
+  </mxCell>
+  <mxCell id="c34" value="Receiver Chain — 5 stages — Optimised via Digi-Key API" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;" vertex="1" parent="1">
+    <mxGeometry x="80" y="200" width="940" height="30" as="geometry" />
+  </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

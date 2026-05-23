@@ -385,13 +385,17 @@ def estimate_iip3(c: ComponentSpec, stage_name: str = "") -> float:
     Returns IIP3 in dBm, or None if truly unknown (will default to very linear).
     """
     cat = (c.category or stage_name).lower()
-    gain = c.gain_db if c.gain_db else (-c.insertion_loss_db if c.insertion_loss_db else 0.0)
+    gain_db_val = c.gain_db if c.gain_db is not None else 0.0
+    il_val = c.insertion_loss_db if c.insertion_loss_db is not None else 0.0
+    gain = gain_db_val if gain_db_val != 0.0 else (-il_val if il_val != 0.0 else 0.0)
     p1db = c.p1db_dbm if c.p1db_dbm else 0.0
 
     # ── 1. Frequency-verified: OIP3−Gain directly from datasheet ──
     # Component passed search_stage_candidates() frequency filter,
     # so any OIP3/IIP3 in the DB is valid at our operating frequency.
-    freq_populated = c.freq_min_hz > 0 and c.freq_max_hz > 0
+    fmin = c.freq_min_hz if c.freq_min_hz is not None else 0.0
+    fmax = c.freq_max_hz if c.freq_max_hz is not None else 0.0
+    freq_populated = fmin > 0 and fmax > 0
     if freq_populated:
         api_iip3 = c.iip3_from_oip3()
         if api_iip3 and abs(api_iip3) > 0.01:
@@ -457,16 +461,18 @@ def optimize_chain(
                     continue
 
                 g_lin = db_to_lin_gain(c.gain_db if c.gain_db else 0.0)
-                if c.gain_db <= 0 and c.insertion_loss_db:
+                gain_db_val = c.gain_db if c.gain_db is not None else 0.0
+                if gain_db_val <= 0 and c.insertion_loss_db:
                     g_lin = db_to_lin_gain(-c.insertion_loss_db)
 
                 # NF: if component has insertion loss (passive), NF ≈ IL in dB
+                nf_val = 0.0
                 if c.nf_db:
                     nf_val = c.nf_db
-                elif c.insertion_loss_db and c.gain_db <= 0:
+                elif c.insertion_loss_db and gain_db_val <= 0:
                     nf_val = abs(c.insertion_loss_db)  # IL stored as negative, NF is positive
-                else:
-                    nf_val = abs(c.gain_db) if c.gain_db else 0.0
+                elif c.gain_db:
+                    nf_val = abs(c.gain_db)
                 nf_lin = db_to_lin_nf(nf_val)
 
                 iip3_val = estimate_iip3(c, stage_name)
@@ -501,8 +507,11 @@ def _compatible(c: ComponentSpec) -> bool:
     """Component must have a part number and at least one useful spec."""
     if not c.part_number:
         return False
-    has_gain = c.gain_db != 0.0 or c.insertion_loss_db != 0.0
-    has_nf = c.nf_db != 0.0
+    gat = c.gain_db or 0.0
+    il = c.insertion_loss_db or 0.0
+    nf = c.nf_db or 0.0
+    has_gain = gat != 0.0 or il != 0.0
+    has_nf = nf != 0.0
     return has_gain or has_nf
 
 
@@ -554,11 +563,53 @@ def dbm_to_mw(dbm: float) -> float:
     return 10.0 ** (dbm / 10.0)
 
 
+import re
+
+_FREQ_DESC_RE = re.compile(
+    r'(?P<min>\d+\.?\d*)\s*(?:GHz|GHz|Ghz|ghz)\s*(?:[–\-to~]*)\s*'
+    r'(?P<max>\d+\.?\d*)\s*(?:GHz|GHz|Ghz|ghz)'
+)
+
+_FREQ_SINGLE_RE = re.compile(
+    r'(?P<val>\d+\.?\d*)\s*(?:GHz|GHz|Ghz|ghz)'
+)
+
+
+def _extract_freq_from_desc(spec: ComponentSpec) -> None:
+    """Parse frequency range from component description as fallback.
+
+    Digi-Key often omits parametric freq_min/max for RF components,
+    but the product description includes them (e.g. "18-26 GHz Bandpass
+    Filter"). This fills in freq_min_hz/freq_max_hz from the description.
+    """
+    if not spec.description:
+        return
+
+    m = _FREQ_DESC_RE.search(spec.description)
+    if m:
+        fmin = float(m.group("min")) * 1e9
+        fmax = float(m.group("max")) * 1e9
+        if fmin > 0 and fmax > 0 and fmin < fmax:
+            spec.freq_min_hz = fmin
+            spec.freq_max_hz = fmax
+            return
+
+    m = _FREQ_SINGLE_RE.search(spec.description)
+    if m:
+        fc = float(m.group("val")) * 1e9
+        if fc > 0:
+            bw_pct = 0.05
+            spec.freq_min_hz = fc * (1 - bw_pct)
+            spec.freq_max_hz = fc * (1 + bw_pct)
+
+
 # ── API-based candidate search ───────────────────────────────────────
 
 STAGE_KEYWORDS = {
     "Switch": ["RF Switch", "SPDT Switch"],
-    "BPF": ["Band Pass Filter", "Bandpass Filter"],
+    "BPF": ["RF Filter", "Band Pass Filter", "Bandpass Filter", "RF Bandpass Filter",
+            "Waveguide Bandpass Filter", "K Band Filter", "Ka Band Filter",
+            "Cavity Bandpass Filter", "Ceramic Bandpass Filter"],
     "LNA": ["LNA", "Low Noise Amplifier", "RF Amplifier", "Ultra Low Noise Amplifier"],
     "Mixer": ["RF Mixer", "Frequency Mixer"],
     "Limiter": ["RF Limiter", "Limiter"],
@@ -576,13 +627,13 @@ STAGE_KEYWORDS = {
 
 def _is_spec_plausible(spec: ComponentSpec, stage_name: str) -> bool:
     """Reject components with physically impossible RF specs from API."""
-    # NF < 0 dB is physically impossible
-    if spec.nf_db < 0:
+    # NF < 0 dB is physically impossible (None means unknown — allow)
+    if spec.nf_db is not None and spec.nf_db < 0:
         return False
     # Insertion loss > 0 is physically correct (positive loss)
     # but API may store as negative — that's fine if abs(IL) >= NF
     # The real check: active stages (LNA, ULNA, Mixer) should have non-zero gain
-    if stage_name in ("LNA", "ULNA", "Mixer") and spec.gain_db <= 0 and spec.insertion_loss_db == 0:
+    if stage_name in ("LNA", "ULNA", "Mixer") and (spec.gain_db is None or spec.gain_db <= 0) and (spec.insertion_loss_db is None or spec.insertion_loss_db == 0):
         return False
     return True
 
@@ -598,6 +649,7 @@ def search_stage_candidates(
     collapse_packaging: bool = True,      # Phase 1: CollapsePackingTypes
     max_pages: int = 2,                   # Phase 2: how many pages (50/page)
     use_parametric_filter: bool = False,
+    require_freq_data: bool = True,       # Reject components without freq range at RF
 ) -> list[ComponentSpec]:
     """Search Digi-Key for candidate components matching a stage type.
 
@@ -714,11 +766,23 @@ def search_stage_candidates(
                         spec.category = stage_name
                         candidates.append(spec)
 
+    # Try to extract frequency range from component description if parametric
+    # data unavailable (Digi-Key often has freq in text but not in structured fields).
+    for spec in candidates:
+        if (not (freq_ghz and spec.freq_min_hz > 0 and spec.freq_max_hz > 0)
+                and spec.description and freq_ghz):
+            _extract_freq_from_desc(spec)
+
     # Frequency guard-band filter: exact match by default.
     # Set --freq-guard-band N for ±N% margin around target.
+    # When require_freq_data is True (default) and freq > 1 GHz, components
+    # missing frequency range data are rejected to avoid polluting results
+    # with parts not designed for the target band (e.g. GPS LNA found for 20 GHz).
     filtered: list[ComponentSpec] = []
+    rf_freq_strict = freq_ghz > 5.0
     for spec in candidates:
-        if freq_ghz and spec.freq_min_hz > 0 and spec.freq_max_hz > 0:
+        has_freq_data = freq_ghz and spec.freq_min_hz > 0 and spec.freq_max_hz > 0
+        if has_freq_data:
             f_hz = freq_ghz * 1e9
             if freq_guard_band_pct > 0:
                 margin = freq_ghz * (freq_guard_band_pct / 100.0) * 1e9
@@ -732,6 +796,10 @@ def search_stage_candidates(
                       f"does not cover {freq_ghz} GHz"
                       + (f" (guard ±{freq_guard_band_pct:.0f}% @ {freq_ghz} GHz)" if freq_guard_band_pct > 0 else ""))
                 continue
+        elif require_freq_data and rf_freq_strict:
+            print(f"    [skip] {spec.part_number}: no frequency range data, "
+                  f"cannot verify {freq_ghz} GHz (use --freq-guard-band 0 to allow)")
+            continue
         if extract_pdfs:
             spec = fetch_and_extract_specs(spec, db)
         filtered.append(spec)
@@ -827,6 +895,14 @@ TEMPLATES: dict[str, list[StageDef]] = {
     "compact":    ["BPF", "LNA", "Mixer", "LNA"],
     "no_switch":  ["BPF", "LNA", "Mixer", "BPF", "LNA"],
     "full":       ["Switch", "BPF", "LNA", "BPF", "Mixer", "BPF", "LNA", "BPF"],
+    # Minimal downconv: no RF BPF (for bands where filter data is unavailable)
+    "no_bpf_rf": [
+        "Switch",              # RF
+        "LNA",                 # RF LNA
+        ("Mixer", None),       # RF → IF
+        ("BPF", "IF"),         # IF filter
+        ("LNA", "IF"),         # IF amplifier
+    ],
     # Zero-IF / direct conversion: RF → BB (single mixer, no IF strip)
     "zero_if": [
         "Switch",              # RF
@@ -906,6 +982,7 @@ def optimize_all_templates(
     required_stages: list[str] = None,
     if_freq_ghz: float = 2.5,
     bb_freq_ghz: float = 0.1,
+    require_freq_data: bool = True,
 ) -> list[tuple]:
     """Try all templates at all valid stage lengths, return sorted results.
     
@@ -931,12 +1008,25 @@ def optimize_all_templates(
                     use_deep_search=use_deep_search,
                     collapse_packaging=collapse_packaging,
                     max_pages=max_pages,
+                    require_freq_data=require_freq_data,
                 )
                 print(f"    → {len(candidate_cache[cache_key])} candidates")
         
         # Try variable lengths
         max_len = len(stage_types)
         lengths = [max_len] if force_full else range(min(min_stages, max_len), max_len + 1)
+        
+        # NEW: Ensure IF stages after Mixer are included (unless force_full bypasses this)
+        # Find the first Mixer stage; if there are stages after it, the minimum length
+        # must include the Mixer + at least one post-Mixer (IF/BB) stage.
+        if not force_full:
+            for i, sd in enumerate(stage_types):
+                name, _ = _resolve_freq(sd, freq_ghz, if_freq_ghz, bb_freq_ghz)
+                if name == "Mixer" and i + 1 < len(stage_types):
+                    min_with_if = max(min_stages, i + 2)
+                    lengths = [l for l in lengths if l >= min_with_if]
+                    break
+        
         for length in lengths:
             sub_defs = stage_types[:length]
             stage_candidates = []
@@ -1349,8 +1439,15 @@ def main():
                         help="Disable paginated search with SearchOptions (Phase 1+2)")
     parser.add_argument("--no-collapse-packaging", action="store_true",
                         help="Disable CollapsePackingTypes SearchOption")
+    parser.add_argument("--parametric-filter", action="store_true", default=False,
+                        help="Use Digi-Key parametric frequency filter (more precise search)")
     parser.add_argument("--deep-pages", type=int, default=2,
                         help="Number of API pages to fetch (50/page, default: 2)")
+    parser.add_argument("--require-freq-data", action="store_true", default=True,
+                        help="Reject components without frequency range data at RF (default: True). "
+                             "Set --no-require-freq-data to allow parts with unknown freq range.")
+    parser.add_argument("--no-require-freq-data", action="store_false", dest="require_freq_data",
+                        help="Allow components without frequency range data")
     
     # SNR optimization
     parser.add_argument("--snr-optimize", action="store_true", default=True,
@@ -1440,9 +1537,10 @@ def main():
     
     if args.snr_optimize:
         deep_status = f"deep={not args.no_deep_search}({args.deep_pages}pg)"
+        freq_req = "req_freq" if args.require_freq_data else "allow_no_freq"
         print(f"  System: T_ant={args.antenna_temp} K, BW={args.bw/1e6:.1f} MHz, "
               f"Si={args.input_signal:.1f} dBm (SNR_in={sys_cfg.input_snr_db():.1f} dB), "
-              f"guard_band=±{args.freq_guard_band:.0f}%, {deep_status}")
+              f"guard_band=±{args.freq_guard_band:.0f}%, {deep_status}, {freq_req}")
     
     # ── Frequency sweep ────────────────────────────────────────────────
     if_freqs = [float(f.strip()) for f in args.if_sweep.split(",") if f.strip()] if args.if_sweep else [args.if_freq]
@@ -1473,6 +1571,7 @@ def main():
                 required_stages=required,
                 if_freq_ghz=if_f,
                 bb_freq_ghz=bb_f,
+                require_freq_data=args.require_freq_data,
             )
             if results:
                 if not best_results or results[0][0] < best_results[0][0]:

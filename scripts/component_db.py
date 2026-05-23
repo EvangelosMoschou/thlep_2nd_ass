@@ -83,9 +83,11 @@ class ComponentSpec:
 
     def iip3_from_oip3(self) -> float:
         """Estimate IIP3 = OIP3 - Gain  when only OIP3 is available."""
-        if self.iip3_dbm == 0.0 and self.oip3_dbm != 0.0 and self.gain_db != 0.0:
-            return self.oip3_dbm - self.gain_db
-        return self.iip3_dbm
+        oip3 = self.oip3_dbm if self.oip3_dbm is not None else 0.0
+        gain = self.gain_db if self.gain_db is not None else 0.0
+        if self.iip3_dbm in (None, 0.0) and oip3 != 0.0 and gain != 0.0:
+            return oip3 - gain
+        return self.iip3_dbm or 0.0
 
     def to_cache_entry(self) -> dict:
         d = asdict(self)

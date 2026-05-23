@@ -1,0 +1,25 @@
+{
+  "pdf_path": "pdfs/SKY85331-11.pdf",
+  "part_number": "SKY85331-11",
+  "manufacturer": null,
+  "freq_min_hz": null,
+  "freq_max_hz": null,
+  "gain_db": null,
+  "nf_db": null,
+  "p1db_dbm": null,
+  "oip3_dbm": null,
+  "iip3_dbm": null,
+  "supply_voltage": null,
+  "supply_current": null,
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "not_found",
+    "freq_range": "not_found",
+    "gain_db": "not_found",
+    "nf_db": "not_found",
+    "p1db_dbm": "not_found",
+    "oip3_dbm": "not_found",
+    "iip3_dbm": "not_found"
+  },
+  "error": "No /Root object! - Is this really a PDF?"
+}

@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/CMD245C4.pdf",
+  "part_number": "CMD245C4",
+  "manufacturer": "Qorvo",
+  "freq_min_hz": null,
+  "freq_max_hz": null,
+  "gain_db": null,
+  "nf_db": 4.5,
+  "p1db_dbm": 18.0,
+  "oip3_dbm": 28.0,
+  "iip3_dbm": null,
+  "supply_voltage": null,
+  "supply_current": "76 mA",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "not_found",
+    "gain_db": "not_found",
+    "nf_db": "exact",
+    "p1db_dbm": "exact",
+    "oip3_dbm": "estimated",
+    "iip3_dbm": "not_found"
+  }
+}

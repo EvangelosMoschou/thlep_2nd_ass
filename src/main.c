@@ -1396,23 +1396,57 @@ static int simulate_bruteforce_rf(
                  dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
   }
 
-  /* IF Spectrum: complex FFT of raw downconverter output (before LPF/dec)
-   * Shows dual sidebands at ±IF after heterodyne mixing */
-  {
-    size_t nraw = nrf;  /* i_raw/q_raw have same length as RF signal */
-    size_t nfft = 1u; while (nfft * 2u <= nraw) nfft *= 2u;
+  /* IF Spectrum: complex FFT of real IF signal (imag=0)
+   * rf_sig is unmodified by mix_down_soa (const param).
+   * Complex FFT of real signal produces conjugate-symmetric output:
+   * dual peaks at ±IF from the heterodyne mixer. */
+  if (current_center_hz != cfg->carrier_hz) {
+    size_t nfft = 1u; while (nfft * 2u <= nrf) nfft *= 2u;
     size_t m = nfft + 2u;
     double *freq = malloc(m * sizeof(double));
     double *mag = malloc(m * sizeof(double));
-    if (freq && mag) {
-      int nb = fft_complex_spectrum_dB(i_raw, q_raw, nfft, fs_hz, freq, mag, m);
+    double *zero_im = calloc(nfft, sizeof(double));
+    if (freq && mag && zero_im) {
+      int nb = fft_complex_spectrum_dB(rf_sig, zero_im, nfft, fs_hz, freq, mag, m);
       if (nb > 0) {
-        /* Zoom to ±10 MHz around IF */
-        double if_zoom_lo = (current_center_hz > 0.0) ? -10.0e6 : -10.0e6;
-        double if_zoom_hi = (current_center_hz > 0.0) ? 10.0e6 : 10.0e6;
+        /* IF Spectrum — medium zoom: filter original FFT to ±100 MHz */
+        {
+          double zoom_fl = -50.0e6, zoom_fh = 50.0e6;
+          size_t nz = 0u;
+          for (int ri = 0; ri < nb; ri++)
+            if (freq[ri] >= zoom_fl && freq[ri] <= zoom_fh) nz++;
+          if (nz > 1u) {
+            double *zf = malloc(nz * sizeof(double));
+            double *zm = malloc(nz * sizeof(double));
+            if (zf && zm) {
+              size_t wi = 0u;
+              for (int ri = 0; ri < nb; ri++)
+                if (freq[ri] >= zoom_fl && freq[ri] <= zoom_fh) {
+                  zf[wi] = freq[ri]; zm[wi] = mag[ri]; wi++;
+                }
+              size_t max_d = 1000u;
+              if (nz > max_d) {
+                size_t stride = nz / max_d;
+                for (size_t di = 0u; di < max_d; di++) {
+                  double sa = 0.0;
+                  for (size_t sj = 0u; sj < stride && di*stride+sj < nz; sj++)
+                    sa += zm[di*stride+sj];
+                  zm[di] = sa / (double)stride;
+                  zf[di] = zf[di*stride + stride/2u];
+                }
+                nz = max_d;
+              }
+              char fpath[512];
+              snprintf(fpath, sizeof(fpath), "%s/receiver_stage_07_full.svg", spectrum_dir);
+              write_spectrum_svg(fpath, zf, zm, nz, 0.0, "IF Spectrum (full)");
+            }
+            free(zf); free(zm);
+          }
+        }
+        double zoom_lo = -2.0e6, zoom_hi = 2.0e6;
         size_t wi = 0u, ri; size_t nc = (size_t)nb;
         for (ri = 0u; ri < nc; ri++) {
-          if (freq[ri] >= if_zoom_lo && freq[ri] <= if_zoom_hi) {
+          if (freq[ri] >= zoom_lo && freq[ri] <= zoom_hi) {
             freq[wi] = freq[ri]; mag[wi] = mag[ri]; wi++;
           }
         }
@@ -1431,11 +1465,65 @@ static int simulate_bruteforce_rf(
           }
           char path[512];
           snprintf(path, sizeof(path), "%s/receiver_stage_07_spectrum.svg", spectrum_dir);
-          write_spectrum_svg(path, freq, mag, nc, 0.0, "IF Spectrum (raw downconverter)");
+          write_spectrum_svg(path, freq, mag, nc, 0.0, "IF Spectrum (dual sidebands)");
+
+          /* Annotate peak positions with dashed markers */
+          {
+            double f_min = freq[0], f_max = freq[nc - 1u], f_span = f_max - f_min;
+            if (f_span > 0.0) {
+              double neg_peak_mag = -INFINITY, pos_peak_mag = -INFINITY;
+              double neg_peak_freq = 0.0, pos_peak_freq = 0.0;
+              size_t ki;
+              for (ki = 0u; ki < nc; ki++) {
+                if (freq[ki] < 0.0 && mag[ki] > neg_peak_mag) {
+                  neg_peak_mag = mag[ki];
+                  neg_peak_freq = freq[ki];
+                }
+                if (freq[ki] > 0.0 && mag[ki] > pos_peak_mag) {
+                  pos_peak_mag = mag[ki];
+                  pos_peak_freq = freq[ki];
+                }
+              }
+              {
+                FILE *f = fopen(path, "r");
+                if (f) {
+                  fseek(f, 0, SEEK_END);
+                  long fsz = ftell(f);
+                  fseek(f, 0, SEEK_SET);
+                  char *svg_buf = (char *)malloc((size_t)fsz + 1u);
+                  size_t nrd = 0;
+                  if (svg_buf) nrd = fread(svg_buf, 1, (size_t)fsz, f);
+                  fclose(f);
+                  if (svg_buf) {
+                    svg_buf[nrd] = '\0';
+                    char *closing = strstr(svg_buf, "</svg>");
+                    if (closing) {
+                      size_t prefix = (size_t)(closing - svg_buf);
+                      f = fopen(path, "w");
+                      if (f) {
+                        fwrite(svg_buf, 1, prefix, f);
+                        const int ml2 = 80, mt2 = 50, ph = 630;
+                        const double px_hz = 870.0 / f_span;
+                        double xl = (double)ml2 + (neg_peak_freq - f_min) * px_hz;
+                        double xr = (double)ml2 + (pos_peak_freq - f_min) * px_hz;
+                        fprintf(f, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"#dc2626\" stroke-dasharray=\"6,3\" stroke-width=\"1.5\"/>\n", xl, mt2, xl, mt2 + ph);
+                        fprintf(f, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"#dc2626\" stroke-dasharray=\"6,3\" stroke-width=\"1.5\"/>\n", xr, mt2, xr, mt2 + ph);
+                        fprintf(f, "<text x=\"%.1f\" y=\"%d\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#dc2626\" font-weight=\"bold\">%.0f kHz</text>\n", xl, mt2 - 6, neg_peak_freq / 1e3);
+                        fprintf(f, "<text x=\"%.1f\" y=\"%d\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#dc2626\" font-weight=\"bold\">+%.0f kHz</text>\n", xr, mt2 - 6, pos_peak_freq / 1e3);
+                        fprintf(f, "</svg>\n");
+                        fclose(f);
+                      }
+                    }
+                    free(svg_buf);
+                  }
+                }
+              }
+            }
+          }
         }
       }
     }
-    free(freq); free(mag);
+    free(freq); free(mag); free(zero_im);
   }
 
   t_downconv = omp_get_wtime();
@@ -1986,6 +2074,130 @@ static int simulate_realistic_rf(
                  dec_factor, bb_ref_re, bb_ref_im, i_raw, q_raw);
     mix_down_soa(rf_sig, nrf, fs_hz, realistic_center_hz, cutoff_hz,
                  dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
+  }
+
+  /* IF Spectrum for realistic path: same as baseline */
+  if (realistic_center_hz != cfg->carrier_hz) {
+    size_t nfft = 1u; while (nfft * 2u <= nrf) nfft *= 2u;
+    size_t m = nfft + 2u;
+    double *freq = malloc(m * sizeof(double));
+    double *mag = malloc(m * sizeof(double));
+    double *zero_im = calloc(nfft, sizeof(double));
+    if (freq && mag && zero_im) {
+      int nb = fft_complex_spectrum_dB(rf_sig, zero_im, nfft, fs_hz, freq, mag, m);
+      if (nb > 0) {
+        /* IF Spectrum — medium zoom: filter original FFT to ±100 MHz */
+        {
+          double zoom_fl = -50.0e6, zoom_fh = 50.0e6;
+          size_t nz = 0u;
+          for (int ri = 0; ri < nb; ri++)
+            if (freq[ri] >= zoom_fl && freq[ri] <= zoom_fh) nz++;
+          if (nz > 1u) {
+            double *zf = malloc(nz * sizeof(double));
+            double *zm = malloc(nz * sizeof(double));
+            if (zf && zm) {
+              size_t wi = 0u;
+              for (int ri = 0; ri < nb; ri++)
+                if (freq[ri] >= zoom_fl && freq[ri] <= zoom_fh) {
+                  zf[wi] = freq[ri]; zm[wi] = mag[ri]; wi++;
+                }
+              size_t max_d = 1000u;
+              if (nz > max_d) {
+                size_t stride = nz / max_d;
+                for (size_t di = 0u; di < max_d; di++) {
+                  double sa = 0.0;
+                  for (size_t sj = 0u; sj < stride && di*stride+sj < nz; sj++)
+                    sa += zm[di*stride+sj];
+                  zm[di] = sa / (double)stride;
+                  zf[di] = zf[di*stride + stride/2u];
+                }
+                nz = max_d;
+              }
+              char fpath[512];
+              snprintf(fpath, sizeof(fpath), "%s/receiver_stage_07_full.svg", spectrum_dir);
+              write_spectrum_svg(fpath, zf, zm, nz, 0.0, "IF Spectrum (full)");
+            }
+            free(zf); free(zm);
+          }
+        }
+        double zoom_lo = -2.0e6, zoom_hi = 2.0e6;
+        size_t wi = 0u, ri; size_t nc = (size_t)nb;
+        for (ri = 0u; ri < nc; ri++) {
+          if (freq[ri] >= zoom_lo && freq[ri] <= zoom_hi) {
+            freq[wi] = freq[ri]; mag[wi] = mag[ri]; wi++;
+          }
+        }
+        if (wi > 1u) {
+          size_t max_d = 1000u, di; nc = wi;
+          if (nc > max_d) {
+            size_t stride = nc / max_d;
+            for (di = 0u; di < max_d; di++) {
+              double sa = 0.0; size_t sj, start = di * stride;
+              for (sj = 0u; sj < stride && start + sj < nc; sj++)
+                sa += mag[start + sj];
+              mag[di] = sa / (double)stride;
+              freq[di] = freq[start + stride/2u];
+            }
+            nc = max_d;
+          }
+          char path[512];
+          snprintf(path, sizeof(path), "%s/receiver_stage_07_spectrum.svg", spectrum_dir);
+          write_spectrum_svg(path, freq, mag, nc, 0.0, "IF Spectrum (dual sidebands)");
+
+          {
+            double f_min = freq[0], f_max = freq[nc - 1u], f_span = f_max - f_min;
+            if (f_span > 0.0) {
+              double neg_peak_mag = -INFINITY, pos_peak_mag = -INFINITY;
+              double neg_peak_freq = 0.0, pos_peak_freq = 0.0;
+              size_t ki;
+              for (ki = 0u; ki < nc; ki++) {
+                if (freq[ki] < 0.0 && mag[ki] > neg_peak_mag) {
+                  neg_peak_mag = mag[ki];
+                  neg_peak_freq = freq[ki];
+                }
+                if (freq[ki] > 0.0 && mag[ki] > pos_peak_mag) {
+                  pos_peak_mag = mag[ki];
+                  pos_peak_freq = freq[ki];
+                }
+              }
+              const int ml = 80, mt = 50, plot_h = 630;
+              const double px_per_hz = 870.0 / f_span;
+              FILE *f = fopen(path, "r");
+              if (f) {
+                fseek(f, 0, SEEK_END);
+                long fsz = ftell(f);
+                fseek(f, 0, SEEK_SET);
+                char *svg_buf = (char *)malloc((size_t)fsz + 1u);
+                size_t nrd = 0;
+                if (svg_buf) nrd = fread(svg_buf, 1, (size_t)fsz, f);
+                fclose(f);
+                if (svg_buf) {
+                  svg_buf[nrd] = '\0';
+                  char *closing = strstr(svg_buf, "</svg>");
+                  if (closing) {
+                    size_t prefix = (size_t)(closing - svg_buf);
+                    f = fopen(path, "w");
+                    if (f) {
+                      fwrite(svg_buf, 1, prefix, f);
+                      double xl = (double)ml + (neg_peak_freq - f_min) * px_per_hz;
+                      double xr = (double)ml + (pos_peak_freq - f_min) * px_per_hz;
+                      fprintf(f, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"#dc2626\" stroke-dasharray=\"6,3\" stroke-width=\"1.5\"/>\n", xl, mt, xl, mt + plot_h);
+                      fprintf(f, "<line x1=\"%.1f\" y1=\"%d\" x2=\"%.1f\" y2=\"%d\" stroke=\"#dc2626\" stroke-dasharray=\"6,3\" stroke-width=\"1.5\"/>\n", xr, mt, xr, mt + plot_h);
+                      fprintf(f, "<text x=\"%.1f\" y=\"%d\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#dc2626\" font-weight=\"bold\">%.0f kHz</text>\n", xl, mt - 6, neg_peak_freq / 1e3);
+                      fprintf(f, "<text x=\"%.1f\" y=\"%d\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#dc2626\" font-weight=\"bold\">+%.0f kHz</text>\n", xr, mt - 6, pos_peak_freq / 1e3);
+                      fprintf(f, "</svg>\n");
+                      fclose(f);
+                    }
+                  }
+                  free(svg_buf);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    free(freq); free(mag); free(zero_im);
   }
 
   /* Step 9: Apply RX LO phase noise as complex rotation on baseband */

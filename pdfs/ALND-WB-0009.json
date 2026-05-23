@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/ALND-WB-0009.pdf",
+  "part_number": "ALND-WB-0009",
+  "manufacturer": "Cree",
+  "freq_min_hz": null,
+  "freq_max_hz": null,
+  "gain_db": 23.5,
+  "nf_db": 1.4,
+  "p1db_dbm": 18.0,
+  "oip3_dbm": 28.0,
+  "iip3_dbm": 4.5,
+  "supply_voltage": null,
+  "supply_current": "110 mA",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "not_found",
+    "gain_db": "table",
+    "nf_db": "table",
+    "p1db_dbm": "table",
+    "oip3_dbm": "estimated",
+    "iip3_dbm": "estimated"
+  }
+}

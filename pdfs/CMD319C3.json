@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/CMD319C3.pdf",
+  "part_number": "CMD319C3",
+  "manufacturer": "Qorvo",
+  "freq_min_hz": 8000000000.0,
+  "freq_max_hz": 12000000000.0,
+  "gain_db": 20.0,
+  "nf_db": 0.92,
+  "p1db_dbm": 16.0,
+  "oip3_dbm": 22.0,
+  "iip3_dbm": 2.0,
+  "supply_voltage": null,
+  "supply_current": "30 mA",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "exact",
+    "gain_db": "exact",
+    "nf_db": "exact",
+    "p1db_dbm": "exact",
+    "oip3_dbm": "exact",
+    "iip3_dbm": "estimated"
+  }
+}

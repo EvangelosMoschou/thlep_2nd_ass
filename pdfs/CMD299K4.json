@@ -1,0 +1,24 @@
+{
+  "pdf_path": "pdfs/CMD299K4.pdf",
+  "part_number": "CMD299K4",
+  "manufacturer": "Qorvo",
+  "freq_min_hz": 18000000000.0,
+  "freq_max_hz": 40000000000.0,
+  "gain_db": 16.0,
+  "nf_db": 4.0,
+  "p1db_dbm": 7.0,
+  "oip3_dbm": 18.0,
+  "iip3_dbm": 2.0,
+  "supply_voltage": null,
+  "supply_current": "33 mA",
+  "confidence": {
+    "part_number": "filename",
+    "manufacturer": "exact",
+    "freq_range": "exact",
+    "gain_db": "exact",
+    "nf_db": "exact",
+    "p1db_dbm": "exact",
+    "oip3_dbm": "exact",
+    "iip3_dbm": "estimated"
+  }
+}

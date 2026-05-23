@@ -45,3 +45,6 @@ data_input/component_cache/
 data_input/*.db
 push_payload.json
 
+# Playwright cache
+.playwright-mcp/
+
