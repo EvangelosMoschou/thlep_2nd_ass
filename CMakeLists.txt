@@ -44,6 +44,9 @@ set(SOURCES
     src/soa_utils.c
     src/spectrum.c
     src/perf_timer.c
+    src/rf_setup.c
+    src/sim_rf.c
+    src/sim_rf_realistic.c
 )
 
 # ── Target ────────────────────────────────────────────────────────────────────

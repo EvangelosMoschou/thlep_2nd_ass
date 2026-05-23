@@ -49,3 +49,6 @@ push_payload.json
 .playwright-mcp/
 
 node_modules
+baseline_out/
+package.json
+package-lock.json
