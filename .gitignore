@@ -48,3 +48,4 @@ push_payload.json
 # Playwright cache
 .playwright-mcp/
 
+node_modules
