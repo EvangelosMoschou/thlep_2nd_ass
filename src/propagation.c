@@ -220,8 +220,9 @@ double rain_specific_attenuation(double f_ghz, double R_mmh,
     /* Combine for given elevation and polarisation (eqs. 4, 5) */
     cos2e = cos(deg2rad(elev_deg));
     cos2e = cos2e * cos2e;
-    cos2t = cos(deg2rad(tau_deg));
-    cos2t = cos2t * cos2t;
+    /* P.838-3 eq. 4: polarisation term is cos(2*tau), NOT cos^2(tau).
+     * For circular polarisation (tau = 45 deg) it must vanish. */
+    cos2t = cos(2.0 * deg2rad(tau_deg));
 
     k = (k_H + k_V + (k_H - k_V) * cos2e * cos2t) / 2.0;
 

@@ -866,6 +866,7 @@ static int map_legacy_component(
  *   -8  = Memory allocation failed while adding a stage
  *   -9  = File contains no header row (completely empty/blank)
  *   -10 = One or more chains have zero stages after loading
+ *   -11 = A CSV line exceeds MAX_LINE_LEN characters (truncated by fgets)
  */
 int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char* errbuf, size_t errbuf_size) {
     FILE* f;                         /* File handle for the CSV */
@@ -924,6 +925,25 @@ int stage_models_load_csv(const char* csv_path, StageModelsConfig* out_cfg, char
         char* p;
 
         ++line_no;
+
+        /*
+         * Detect over-long lines that fgets would silently split into two
+         * bogus rows: if the buffer is full and the line has no trailing
+         * newline, the remainder is still in the file. Peek one character
+         * to distinguish truncation from a final line that exactly fills
+         * the buffer (which is complete and valid).
+         */
+        if (strlen(line) == MAX_LINE_LEN - 1u && line[MAX_LINE_LEN - 2u] != '\n') {
+            int c = fgetc(f);
+            if (c != EOF) {
+                set_error(errbuf, errbuf_size,
+                          "Line %u in %s exceeds %d characters (max line length)",
+                          line_no, csv_path, MAX_LINE_LEN - 1);
+                stage_models_free(&cfg);
+                fclose(f);
+                return -11;
+            }
+        }
 
         /* Strip trailing newline/carriage-return characters */
         line[strcspn(line, "\r\n")] = '\0';

@@ -7,10 +7,18 @@ This log tracks performance optimizations made to the C simulator (`receiver_dua
 
 ## Optimization 1: Ziggurat RNG (Box-Muller → Ziggurat)
 
+> ⚠️ **SUPERSEDED (2026-08-24):** The ziggurat implementation was later found
+> to be statistically invalid — the hard-coded tables did not form a valid
+> ziggurat construction, and the "spare" mechanism biased every second draw
+> (measured: mean +0.27, variance ~0.63, correlated consecutive samples).
+> `src/prng.c` now uses the **exact Box-Muller transform** over xoshiro256**,
+> verified against N(0,1) moments and tail probabilities. This section is
+> retained as historical record only.
+
 **Date**: 2026-05-07
 **File**: `src/prng.c`
 **Priority**: High
-**Status**: ✅ IMPLEMENTED & VALIDATED
+**Status**: ❌ SUPERSEDED — reverted to exact Box-Muller (see notice above)
 
 ### Rationale
 The `prng_gauss()` function used Box-Muller transform which requires:

@@ -205,6 +205,8 @@ int compute_cascade(const StageModelsConfig *stage_cfg,
     }
 
     /* Cascade through remaining stages */
+    {
+    int warned = 0;
     for (i = 1; i < (size_t)valid_stages; ++i) {
         const StageModel *s = &stages[i];
         double cat_iip3 = safe_iip3(s->ip3_dbm);
@@ -217,13 +219,27 @@ int compute_cascade(const StageModelsConfig *stage_cfg,
         f_lin = safe_nf_lin(s->nf_db);
         iip3_mW = pow(10.0, cat_iip3 / 10.0);
 
-        /* Friis: F_total = F_prev + (F_i - 1) / G_prev */
-        F_total = F_total + (f_lin - 1.0) / G_roll;
+        /* Guard: a pathological first-stage gain (<= -inf dB) makes G_roll
+         * zero/non-finite, which would turn the Friis/IIP3 terms below into
+         * inf/NaN. Skip the remaining contribution terms in that case. */
+        if (G_roll <= 0.0 || !isfinite(G_roll)) {
+            if (!warned) {
+                fprintf(stderr,
+                        "cascade: non-finite cumulative gain (G_roll=%g) at "
+                        "stage %zu; skipping noise/IIP3 transfer for the "
+                        "remaining stages\n",
+                        G_roll, i);
+                warned = 1;
+            }
+        } else {
+            /* Friis: F_total = F_prev + (F_i - 1) / G_prev */
+            F_total = F_total + (f_lin - 1.0) / G_roll;
 
-        /* IIP3 cascade: 1/IIP3 = 1/IIP3_prev + G_prev / IIP3_i */
-        IIP3_inv = IIP3_inv + G_roll / iip3_mW;
+            /* IIP3 cascade: 1/IIP3 = 1/IIP3_prev + G_prev / IIP3_i */
+            IIP3_inv = IIP3_inv + G_roll / iip3_mW;
 
-        G_roll *= g_lin;
+            G_roll *= g_lin;
+        }
 
         /* Store per-stage cumulative values */
         result->stages[i].name = s->name;
@@ -242,6 +258,7 @@ int compute_cascade(const StageModelsConfig *stage_cfg,
 
         result->stages[i].cum_nf_db = lin_to_db(F_total);
         result->stages[i].cum_iip3_dbm = 10.0 * log10(1.0 / IIP3_inv);
+    }
     }
 
     /* Extract cascade totals from the last stage */

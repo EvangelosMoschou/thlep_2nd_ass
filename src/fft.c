@@ -1,5 +1,6 @@
 #include "fft.h"
 #include "sim_types.h"
+#include <float.h>
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
@@ -15,6 +16,15 @@ static int is_power_of_2(size_t n)
 
 static void apply_hanning_window(const double *in, Complex *out, size_t n)
 {
+    if (n <= 1u) {
+        /* n==1 would divide by zero in the window scale; use an all-ones
+         * (rectangular) window so a single-sample FFT stays well-defined. */
+        for (size_t i = 0; i < n; i++) {
+            out[i].re = in[i];
+            out[i].im = 0.0;
+        }
+        return;
+    }
     double scale = 2.0 * M_PI / (double)(n - 1);
     for (size_t i = 0; i < n; i++) {
         double w = 0.5 * (1.0 - cos(scale * (double)i));
@@ -104,6 +114,9 @@ int fft_spectrum_dB(const double *signal, size_t n, double fs_hz,
     for (size_t i = 0; i < half; i++) {
         freq_out[i] = (double)i * df;
         double mag_sq = buf[i].re * buf[i].re + buf[i].im * buf[i].im;
+        /* Floor zero-power bins at DBL_MIN so log10 never yields -inf
+         * (which would corrupt write_spectrum_svg axis ranges). */
+        if (mag_sq <= 0.0) mag_sq = DBL_MIN;
         mag_dB_out[i] = 10.0 * log10(mag_sq);
     }
 
@@ -123,11 +136,20 @@ int fft_complex_spectrum_dB(const double *re, const double *im,
     Complex *buf = (Complex *)malloc(n * sizeof(Complex));
     if (!buf) return 0;
 
-    double scale = 2.0 * M_PI / (double)(n - 1);
-    for (size_t i = 0; i < n; i++) {
-        double w = 0.5 * (1.0 - cos(scale * (double)i));
-        buf[i].re = re[i] * w;
-        buf[i].im = im[i] * w;
+    if (n <= 1u) {
+        /* Same all-ones window guard as apply_hanning_window (n==1 would
+         * divide by zero in the scale below). */
+        for (size_t i = 0; i < n; i++) {
+            buf[i].re = re[i];
+            buf[i].im = im[i];
+        }
+    } else {
+        double scale = 2.0 * M_PI / (double)(n - 1);
+        for (size_t i = 0; i < n; i++) {
+            double w = 0.5 * (1.0 - cos(scale * (double)i));
+            buf[i].re = re[i] * w;
+            buf[i].im = im[i] * w;
+        }
     }
 
     radix2_fft_inplace(buf, n);
@@ -138,16 +160,22 @@ int fft_complex_spectrum_dB(const double *re, const double *im,
     for (size_t i = half + 1u; i < n; i++, wi++) {
         freq_out[wi] = -((double)(n - i)) * df;
         double mag_sq = buf[i].re * buf[i].re + buf[i].im * buf[i].im;
+        if (mag_sq <= 0.0) mag_sq = DBL_MIN; /* floor zero bins, see above */
         mag_dB_out[wi] = 10.0 * log10(mag_sq);
     }
     /* DC */
     freq_out[wi] = 0.0;
-    mag_dB_out[wi] = 10.0 * log10(buf[0].re * buf[0].re + buf[0].im * buf[0].im);
+    {
+        double mag_sq = buf[0].re * buf[0].re + buf[0].im * buf[0].im;
+        if (mag_sq <= 0.0) mag_sq = DBL_MIN; /* floor zero bins, see above */
+        mag_dB_out[wi] = 10.0 * log10(mag_sq);
+    }
     wi++;
     /* Positive frequencies: df .. fs/2 - df */
     for (size_t i = 1u; i < half; i++, wi++) {
         freq_out[wi] = (double)i * df;
         double mag_sq = buf[i].re * buf[i].re + buf[i].im * buf[i].im;
+        if (mag_sq <= 0.0) mag_sq = DBL_MIN; /* floor zero bins, see above */
         mag_dB_out[wi] = 10.0 * log10(mag_sq);
     }
 

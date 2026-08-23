@@ -65,8 +65,4 @@ int write_chain_architecture_mermaid(
 
 int write_spectrum_svg(const char* path, const double* freq_hz, const double* mag_dB, size_t n_bins, double fs_hz, const char* title);
 
-int write_dual_spectrum_svg(const char* path, const double* freq_hz,
-                            const double* mag1_dB, const double* mag2_dB,
-                            size_t n_bins, double fs_hz, const char* title);
-
 #endif

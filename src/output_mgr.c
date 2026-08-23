@@ -1,9 +1,12 @@
+#define _POSIX_C_SOURCE 200809L /* lstat, rmdir, opendir/readdir under -std=c11 */
+
 #include <dirent.h>
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h> /* rmdir */
 
 #include "output_mgr.h"
 
@@ -33,6 +36,57 @@ static int ensure_dir_exists(const char *path) {
   return 0;
 }
 
+/*
+ * remove_tree — Recursively delete a file or directory tree (post-order)
+ *
+ * Files are unlinked; directories are emptied first, then removed with
+ * rmdir(). Symlinks are unlinked (lstat, not stat, so a symlink to a
+ * directory is not descended into).
+ *
+ * Returns 0 on success, -1 on failure.
+ */
+static int remove_tree(const char *path) {
+  struct stat st;
+  DIR *dir;
+  struct dirent *entry;
+  char entry_path[1024];
+  int written;
+
+  if (lstat(path, &st) != 0) {
+    return -1;
+  }
+
+  if (!S_ISDIR(st.st_mode)) {
+    return remove(path) == 0 ? 0 : -1;
+  }
+
+  dir = opendir(path);
+  if (!dir) {
+    return -1;
+  }
+
+  while ((entry = readdir(dir)) != NULL) {
+    if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+      continue;
+    }
+
+    written =
+        snprintf(entry_path, sizeof(entry_path), "%s/%s", path, entry->d_name);
+    if (written < 0 || (size_t)written >= sizeof(entry_path)) {
+      closedir(dir);
+      return -1;
+    }
+
+    if (remove_tree(entry_path) != 0) {
+      closedir(dir);
+      return -1;
+    }
+  }
+
+  closedir(dir);
+  return rmdir(path) == 0 ? 0 : -1;
+}
+
 int clean_output_dir(const char *path) {
   DIR *dir;
   struct dirent *entry;
@@ -60,7 +114,9 @@ int clean_output_dir(const char *path) {
       return -3;
     }
 
-    if (remove(entry_path) != 0) {
+    /* remove() alone fails on subdirectories; recurse so stray
+     * subdirs (e.g. out/csv/extra) are cleaned instead of aborting. */
+    if (remove_tree(entry_path) != 0) {
       closedir(dir);
       return -4;
     }
@@ -118,13 +174,4 @@ int ensure_output_dirs(const char *base, int topology_id) {
   if (ensure_dir_exists(sub) != 0) return -18;
 
   return 0;
-}
-
-int get_run_dir(char *buf, size_t n, const char *base, int topology_id,
-                const char *path_type) {
-  int written = snprintf(buf, n, "%s/topology_sim_%d/%s", base, topology_id,
-                         path_type);
-  if (written < 0) return -1;
-  if ((size_t)written >= n) return -1;
-  return written;
 }

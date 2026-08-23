@@ -36,7 +36,6 @@ set(SOURCES
     src/biquad_filter.c
     src/constellation.c
     src/metrics.c
-    src/cli_args.c
     src/output_mgr.c
     src/signal_chain.c
     src/sim_baseband.c

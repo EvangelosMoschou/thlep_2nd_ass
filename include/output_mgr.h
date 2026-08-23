@@ -33,22 +33,4 @@ int clean_output_dir(const char *path);
  */
 int ensure_output_dirs(const char *base, int topology_id);
 
-/*
- * get_run_dir — Build a subdirectory path under the output root
- *
- * Parameters:
- *   buf          — Output buffer for the constructed path
- *   n            — Size of the output buffer
- *   base         — Root directory path (e.g., "out")
- *   topology_id  — Simulation slot identifier (1-based)
- *   path_type    — Subdirectory type (e.g., "csv", "constellations",
- *                  "traces")
- *
- * Returns:
- *   Number of bytes written (excluding NUL) on success,
- *   -1 on truncation or snprintf error
- */
-int get_run_dir(char *buf, size_t n, const char *base, int topology_id,
-                const char *path_type);
-
 #endif /* OUTPUT_MGR_H */

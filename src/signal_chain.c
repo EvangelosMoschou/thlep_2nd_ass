@@ -128,6 +128,17 @@ StageMetric apply_stage_complex(const StageModel *stg,
     if (stg->p1db_dbm != INFINITY)
       ip1db_v2 = pow(10.0, (stg->p1db_dbm - 30.0) / 10.0) * R_LOAD_OHM;
 
+    /* Rapp smooth compression (p = 3, 2p = 6), voltage domain:
+     *   comp(r) = (1 + (r/rs)^6)^(-1/6), rs calibrated so compression at
+     * the input P1dB voltage r1 is exactly -1 dB.  Constants hoisted. */
+    double rapp_inv_rs6 = 0.0;
+    if (stg->p1db_dbm != INFINITY) {
+      const double alpha = pow(10.0, -1.0 / 20.0);
+      const double r1 = sqrt(ip1db_v2);
+      const double rs = r1 * pow(pow(alpha, -6.0) - 1.0, -1.0 / 6.0);
+      rapp_inv_rs6 = pow(rs, -6.0);
+    }
+
 #pragma omp parallel for
     for (i = 0; i < n; i++) {
       double p_in = ref[i].re * ref[i].re + ref[i].im * ref[i].im;
@@ -137,8 +148,12 @@ StageMetric apply_stage_complex(const StageModel *stg,
         if (comp > 0.9) comp = 0.9;
         s *= (1.0 - comp);
       }
-      if (stg->p1db_dbm != INFINITY && p_in > (ip1db_v2 * 0.794))
-        s *= sqrt(ip1db_v2 / p_in);
+      if (stg->p1db_dbm != INFINITY) {
+        /* r^6 == p_in^3 (r = |sample| amplitude, p_in = r^2) */
+        double rapp_comp =
+            pow(1.0 + p_in * p_in * p_in * rapp_inv_rs6, -1.0 / 6.0);
+        s *= rapp_comp;
+      }
       ref[i].re *= s;
       ref[i].im *= s;
     }
@@ -152,8 +167,12 @@ StageMetric apply_stage_complex(const StageModel *stg,
         if (comp > 0.9) comp = 0.9;
         s *= (1.0 - comp);
       }
-      if (stg->p1db_dbm != INFINITY && p_in > (ip1db_v2 * 0.794))
-        s *= sqrt(ip1db_v2 / p_in);
+      if (stg->p1db_dbm != INFINITY) {
+        /* r^6 == p_in^3 (r = |sample| amplitude, p_in = r^2) */
+        double rapp_comp =
+            pow(1.0 + p_in * p_in * p_in * rapp_inv_rs6, -1.0 / 6.0);
+        s *= rapp_comp;
+      }
       sig[i].re *= s;
       sig[i].im *= s;
     }
@@ -247,6 +266,17 @@ StageMetric apply_stage_realistic(const StageModel *stg,
     if (stg->p1db_dbm != INFINITY)
       ip1db_v2 = pow(10.0, (stg->p1db_dbm - 30.0) / 10.0) * R_LOAD_OHM;
 
+    /* Rapp smooth compression (p = 3, 2p = 6), voltage domain:
+     *   comp(r) = (1 + (r/rs)^6)^(-1/6), rs calibrated so compression at
+     * the input P1dB voltage r1 is exactly -1 dB.  Constants hoisted. */
+    double rapp_inv_rs6 = 0.0;
+    if (stg->p1db_dbm != INFINITY) {
+      const double alpha = pow(10.0, -1.0 / 20.0);
+      const double r1 = sqrt(ip1db_v2);
+      const double rs = r1 * pow(pow(alpha, -6.0) - 1.0, -1.0 / 6.0);
+      rapp_inv_rs6 = pow(rs, -6.0);
+    }
+
 #pragma omp parallel for
     for (i = 0; i < n; i++) {
       double p_in = sig[i] * sig[i];
@@ -256,8 +286,12 @@ StageMetric apply_stage_realistic(const StageModel *stg,
         if (comp > 0.9) comp = 0.9;
         s *= (1.0 - comp);
       }
-      if (stg->p1db_dbm != INFINITY && p_in > (ip1db_v2 * 0.794))
-        s *= sqrt(ip1db_v2 / p_in);
+      if (stg->p1db_dbm != INFINITY) {
+        /* r^6 == p_in^3 (r = |sample| amplitude, p_in = r^2) */
+        double rapp_comp =
+            pow(1.0 + p_in * p_in * p_in * rapp_inv_rs6, -1.0 / 6.0);
+        s *= rapp_comp;
+      }
       sig[i] *= s;
     }
   }

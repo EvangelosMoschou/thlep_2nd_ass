@@ -15,6 +15,10 @@ static const double butterworth_q[3][3] = {
     { 0.5176380902050415, 0.7071067811865476, 1.9318516525781366 }, /* order 6 */
 };
 
+/* Maximum samples processed per chunk.  Stack scratch buffers are sized to
+ * this; arbitrarily large n is handled by iterating over chunks. */
+#define BQ_CHUNK 4096
+
 static void compute_section_coeffs(BiquadCoeffs *c, double w0, double Q)
 {
     double cos_w0 = cos(w0);
@@ -102,12 +106,21 @@ static void process_section_real(const BiquadCoeffs *c,
     s->y1 = y1; s->y2 = y2;
 }
 
-void biquad_process_real(BiquadState *state, const double *in, double *out, size_t n)
+/*
+ * bq_stream: Chunked stream processor shared by all public entry points.
+ *
+ * Iterates over the input in fixed chunks of at most BQ_CHUNK samples.  For
+ * each chunk the input is FIRST copied into a local scratch buffer, so the
+ * caller's in/out buffers may alias arbitrarily (in-place operation included)
+ * without any overlapping-copy or read-after-write hazard.  The section
+ * cascade then runs into the destination chunk, using two alternating local
+ * scratch arrays for intermediate sections so consecutive sections never
+ * share a buffer.  Section delay-line state lives in BiquadState and persists
+ * across chunk boundaries, making the per-sample arithmetic identical to a
+ * single-pass (non-chunked) reference for any n.
+ */
+static void bq_stream(BiquadState *state, const double *in, double *out, size_t n)
 {
-    if (!state || !in || !out || n == 0) {
-        return;
-    }
-
     if (state->n_sections == 0) {
         if (in != out) {
             memcpy(out, in, n * sizeof(double));
@@ -115,41 +128,41 @@ void biquad_process_real(BiquadState *state, const double *in, double *out, size
         return;
     }
 
-    double buf1[4096];
-    double buf2[4096];
-    const double *src = in;
-    double *dst;
+    double scratch[BQ_CHUNK];   /* per-chunk input copy (aliasing-safe) */
+    double tmp_a[BQ_CHUNK];     /* intermediate section output */
+    double tmp_b[BQ_CHUNK];     /* alternating intermediate section output */
 
-    for (int sec = 0; sec < state->n_sections; sec++) {
-        int is_last = (sec == state->n_sections - 1);
-        dst = is_last ? out : buf2;
-
-        size_t offset = 0;
-        while (offset < n) {
-            size_t chunk = n - offset;
-            if (chunk > 4096) chunk = 4096;
-
-            if (src == in && offset == 0) {
-                process_section_real(&state->coeffs[sec],
-                                     &state->sections[sec],
-                                     in, dst, chunk);
-            } else {
-                memcpy(buf1, src + offset, chunk * sizeof(double));
-                process_section_real(&state->coeffs[sec],
-                                     &state->sections[sec],
-                                     buf1, dst, chunk);
-            }
-
-            if (!is_last) {
-                memcpy(buf1 + offset, buf2, chunk * sizeof(double));
-            }
-            offset += chunk;
+    size_t offset = 0;
+    while (offset < n) {
+        size_t chunk = n - offset;
+        if (chunk > BQ_CHUNK) {
+            chunk = BQ_CHUNK;
         }
 
-        if (!is_last) {
-            src = buf1;
+        /* Copy the input chunk first: safe even when in == out. */
+        memcpy(scratch, in + offset, chunk * sizeof(double));
+
+        const double *src = scratch;
+        for (int sec = 0; sec < state->n_sections; sec++) {
+            int is_last = (sec == state->n_sections - 1);
+            double *dst = is_last ? out + offset : ((sec & 1) ? tmp_b : tmp_a);
+
+            process_section_real(&state->coeffs[sec],
+                                 &state->sections[sec],
+                                 src, dst, chunk);
+
+            src = dst; /* next section consumes this section's output */
         }
+        offset += chunk;
     }
+}
+
+void biquad_process_real(BiquadState *state, const double *in, double *out, size_t n)
+{
+    if (!state || !in || !out || n == 0) {
+        return;
+    }
+    bq_stream(state, in, out, n);
 }
 
 void biquad_process_complex(BiquadState *state, const Complex *in, Complex *out, size_t n)
@@ -165,59 +178,41 @@ void biquad_process_complex(BiquadState *state, const Complex *in, Complex *out,
         return;
     }
 
-    double buf_re[4096], buf_im[4096];
-    double tmp_re[4096], tmp_im[4096];
+    /* Complex LTI filtering equals identical real filtering per component,
+     * so filter the I and Q streams with two identically-initialized copies
+     * of the state (independent delay lines per component). */
+    BiquadState st_re = *state;
+    BiquadState st_im = *state;
 
-    for (size_t i = 0; i < n; i++) {
-        buf_re[i] = in[i].re;
-        buf_im[i] = in[i].im;
+    double re_in[BQ_CHUNK], im_in[BQ_CHUNK];
+    double re_out[BQ_CHUNK], im_out[BQ_CHUNK];
+
+    size_t offset = 0;
+    while (offset < n) {
+        size_t chunk = n - offset;
+        if (chunk > BQ_CHUNK) {
+            chunk = BQ_CHUNK;
+        }
+
+        for (size_t j = 0; j < chunk; j++) {
+            re_in[j] = in[offset + j].re;
+            im_in[j] = in[offset + j].im;
+        }
+
+        bq_stream(&st_re, re_in, re_out, chunk);
+        bq_stream(&st_im, im_in, im_out, chunk);
+
+        for (size_t j = 0; j < chunk; j++) {
+            out[offset + j].re = re_out[j];
+            out[offset + j].im = im_out[j];
+        }
+        offset += chunk;
     }
 
-    for (int sec = 0; sec < state->n_sections; sec++) {
-        int is_last = (sec == state->n_sections - 1);
-        double *dst_re = is_last ? NULL : tmp_re;
-        double *dst_im = is_last ? NULL : tmp_im;
-
-        size_t offset = 0;
-        while (offset < n) {
-            size_t chunk = n - offset;
-            if (chunk > 4096) chunk = 4096;
-
-            double chunk_in_re[4096], chunk_in_im[4096];
-            double chunk_out_re[4096], chunk_out_im[4096];
-
-            for (size_t j = 0; j < chunk; j++) {
-                chunk_in_re[j] = buf_re[offset + j];
-                chunk_in_im[j] = buf_im[offset + j];
-            }
-
-            process_section_real(&state->coeffs[sec],
-                                 &state->sections[sec],
-                                 chunk_in_re, chunk_out_re, chunk);
-            process_section_real(&state->coeffs[sec],
-                                 &state->sections[sec],
-                                 chunk_in_im, chunk_out_im, chunk);
-
-            if (is_last) {
-                for (size_t j = 0; j < chunk; j++) {
-                    out[offset + j].re = chunk_out_re[j];
-                    out[offset + j].im = chunk_out_im[j];
-                }
-            } else {
-                for (size_t j = 0; j < chunk; j++) {
-                    dst_re[offset + j] = chunk_out_re[j];
-                    dst_im[offset + j] = chunk_out_im[j];
-                }
-            }
-            offset += chunk;
-        }
-
-        if (!is_last) {
-            for (size_t i = 0; i < n; i++) {
-                buf_re[i] = dst_re[i];
-                buf_im[i] = dst_im[i];
-            }
-        }
+    /* Persist the I-component delay-line state (the caller's struct can hold
+     * only one set of sections; coefficients are untouched). */
+    for (int i = 0; i < state->n_sections; i++) {
+        state->sections[i] = st_re.sections[i];
     }
 }
 
@@ -230,34 +225,49 @@ void biquad_process_soa(BiquadState *state,
         return;
     }
 
-    Complex *in_c = NULL;
-    Complex *out_c = NULL;
-
-    if (in_re == out_re && in_im == out_im) {
-        in_c = (Complex *)in_re;
-        out_c = (Complex *)out_re;
-    } else {
-        Complex tmp[4096];
-        size_t offset = 0;
-        while (offset < n) {
-            size_t chunk = n - offset;
-            if (chunk > 4096) chunk = 4096;
-
-            for (size_t i = 0; i < chunk; i++) {
-                tmp[i].re = in_re[offset + i];
-                tmp[i].im = in_im[offset + i];
-            }
-
-            biquad_process_complex(state, tmp, tmp, chunk);
-
-            for (size_t i = 0; i < chunk; i++) {
-                out_re[offset + i] = tmp[i].re;
-                out_im[offset + i] = tmp[i].im;
-            }
-            offset += chunk;
+    if (state->n_sections == 0) {
+        if (in_re != out_re) {
+            memcpy(out_re, in_re, n * sizeof(double));
+        }
+        if (in_im != out_im) {
+            memcpy(out_im, in_im, n * sizeof(double));
         }
         return;
     }
 
-    biquad_process_complex(state, in_c, out_c, n);
+    /* Filter the I and Q streams independently with identically-initialized
+     * states.  No Complex* casting of the SoA arrays is ever performed; the
+     * per-chunk input copies make in-place operation (in_re == out_re,
+     * in_im == out_im) safe for any n. */
+    BiquadState st_re = *state;
+    BiquadState st_im = *state;
+
+    double re_in[BQ_CHUNK], im_in[BQ_CHUNK];
+    double re_out[BQ_CHUNK], im_out[BQ_CHUNK];
+
+    size_t offset = 0;
+    while (offset < n) {
+        size_t chunk = n - offset;
+        if (chunk > BQ_CHUNK) {
+            chunk = BQ_CHUNK;
+        }
+
+        for (size_t j = 0; j < chunk; j++) {
+            re_in[j] = in_re[offset + j];
+            im_in[j] = in_im[offset + j];
+        }
+
+        bq_stream(&st_re, re_in, re_out, chunk);
+        bq_stream(&st_im, im_in, im_out, chunk);
+
+        for (size_t j = 0; j < chunk; j++) {
+            out_re[offset + j] = re_out[j];
+            out_im[offset + j] = im_out[j];
+        }
+        offset += chunk;
+    }
+
+    for (int i = 0; i < state->n_sections; i++) {
+        state->sections[i] = st_re.sections[i];
+    }
 }

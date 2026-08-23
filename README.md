@@ -1,8 +1,9 @@
 # receiver_dual_sim
 
-24 GHz K-band satellite receiver simulator for DVB-S2X 64-APSK.
+20 GHz optimized satellite receiver simulator for DVB-S2X 64-APSK.
 Implements full RF front-end cascade analysis (Part E), ITU-R propagation
-models (Part D), and dual-path stage-by-stage signal simulation.
+models (Part D), and dual-path stage-by-stage signal simulation (C core with
+MATLAB reference).
 
 ## Quick Start
 
@@ -11,8 +12,8 @@ make
 ./run.sh
 ```
 
-Output goes to `out/rf_baseline/` and `out/realistic/` with CSV metrics,
-constellation SVGs, and time-domain trace SVGs per receiver stage.
+Output goes to `out/rf_baseline/` and `out/realistic/` with CSV metrics
+and constellation, trace, and spectrum SVGs per receiver stage.
 
 ## Folder Structure
 
@@ -62,15 +63,18 @@ receiver_dual_sim/
 ### Part D — Link Budget
 
 ```
-EIRP (85 dBm)
-  − FSPL (211.18 dB @ 24 GHz, GEO)
-  − Rain attenuation (11.18 dB @ 10 mm/h)
-  − Fog attenuation (0.03 dB)
-  − Gas attenuation (0.44 dB)
-  + Rx antenna gain (40 dBi)
-= Received power (−97.83 dBm)
-  − Sensitivity (−61.88 dBm from cascade)
-= Margin (−35.94 dB)
+EIRP (85.00 dBm)
+  − FSPL (209.60 dB @ 20 GHz, 36000 km)
+  − Rain attenuation (5.66 dB; specific 0.9827 dB/km, slant-path 5.76 km,
+    h_R = 4 km, P.838-3 with cos(2τ) polarization term)
+  − Fog/cloud attenuation (0.02 dB, P.840-9 double-Debye)
+  − Gas attenuation (0.31 dB, O₂+H₂O, P.676-13 reference model,
+    h_o = 6 km, h_w = 2 km)
+= TOTAL propagation loss (215.59 dB)
+  + Rx antenna gain (68.70 dBi, Viasat 13.5 m, aperture efficiency ~65%)
+= Received power (−61.89 dBm)
+  − Sensitivity (−61.80 dBm from cascade)
+= LINK MARGIN (−0.09 dB) ✗ INSUFFICIENT
 ```
 
 All ITU-R models implemented from the original recommendation formulas:
@@ -79,17 +83,45 @@ P.838-3 curve-fit, P.840-9 double-Debye, P.676-13 reference model.
 ### Part E — Cascade Analysis
 
 ```
-Total Gain:       79.36 dB
-Total NF:          2.58 dB
-Total IIP3:      −36.44 dBm
-Sensitivity:     −61.88 dBm  (64-APSK, 200 MHz)
-LDR:              42.69 dB
-SFDR:             35.52 dB
+Total Gain:      151.57 dB   (includes 67.20 dB receive-antenna row as final
+                              chain stage; electronics-only ≈ 84.37 dB)
+Total NF:          2.67 dB
+Total IIP3:      −41.39 dBm
+Output P1dB:      99.58 dBm   (reported by tool; output-referred, inflated by
+                              the antenna-stage convention)
+Output noise No:  61.26 dBm   (reported by tool; output-referred, inflated by
+                              the antenna-stage convention)
+LDR:              38.32 dB
+SFDR:             32.61 dB
+Sensitivity:     −61.80 dBm   = kTB (−90.96 dBm @ 290 K, 200 MHz)
+                              + NF (2.67 dB) + SNR_req (26.5 dB)
+                              (64-APSK, 200 MHz)
 ```
 
 Component IIP3/P1dB values come from **datasheet values** in
 `data_input/20ghz/receiver.csv` (LNA1 ADL8142S: OIP3=17.5 dBm,
 Mixer1 HMC264LC3B: IIP3=14 dBm, etc.), overriding the runtime CSV.
+
+## Simulation Architecture
+
+- Front end is TRUE PASSBAND ("brute-force"): real-valued samples at
+  rf_sample_rate 96 GS/s (~4.8 samples/carrier-cycle at 20 GHz); mixers
+  multiply by literal cos(ωt)
+- After Mix2 downconversion the chain continues as complex baseband at
+  80 MS/s (decimation 1200×), matching a real superheterodyne where
+  post-mixer stages sit near zero IF
+- Per-stage outputs: CSV metrics plus constellation, trace, and spectrum
+  SVGs under `out/rf_baseline/` and `out/realistic/`
+  (layout `out/<path>/{Rx,Tx}/{csv,constellations,traces,spectrum}`)
+- Gaussian noise via exact Box-Muller over xoshiro256** (the former
+  "ziggurat" tables were invalid and were replaced)
+- Reproducibility: pass `--seed <int>` for deterministic runs (default seed
+  is time-based). OpenMP thread teams are pinned (`omp_set_dynamic(0)`, 8
+  threads unless `OMP_NUM_THREADS` is set) so the per-thread PRNG stream
+  partitioning is stable across machines and system load.
+
+Defaults: carrier 20 GHz, rf_sample_rate 96 GHz, symbol rate 10 MHz,
+rolloff 0.2, T_ant 91 K, T0 290 K, B 200 MHz.
 
 ## Build
 
@@ -119,13 +151,17 @@ Flags: `--symbols`, `--snr`, `--seed`, `--carrier`, `--symbol-rate`,
 ```
 out/
 ├── rf_baseline/
-│   ├── csv/              ← Per-stage metrics (SNR, EVM, gain, noise power)
-│   ├── constellations/   ← I/Q scatter plots per stage (SVG)
-│   └── traces/           ← Time-domain waveform overlays (SVG)
+│   └── {Rx,Tx}/
+│       ├── csv/              ← Per-stage metrics (SNR, EVM, gain, noise power)
+│       ├── constellations/   ← I/Q scatter plots per stage (SVG)
+│       ├── traces/           ← Time-domain waveform overlays (SVG)
+│       └── spectrum/         ← Spectrum plots per stage (SVG)
 └── realistic/
-    ├── csv/
-    ├── constellations/
-    └── traces/
+    └── {Rx,Tx}/
+        ├── csv/
+        ├── constellations/
+        ├── traces/
+        └── spectrum/
 ```
 
 Generated when MATLAB runs:

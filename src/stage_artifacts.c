@@ -1631,11 +1631,31 @@ void write_constellation_stage_artifacts(
         snprintf(title, sizeof(title), "%.32s Stage %02zu: %s%.160s", title_prefix, stage_number, info.stage_label, info.metric_suffix);
     }
 
-    write_constellation_csv(csv_path, ref, sig, nsym);
+    /* Normalize sig to match ref RMS power for correct constellation display */
+    Complex *sig_norm = (Complex *)malloc(nsym * sizeof(Complex));
+    if (!sig_norm) return;
+    memcpy(sig_norm, sig, nsym * sizeof(Complex));
+    {
+        double ref_rms_sq = 0.0, sig_rms_sq = 0.0;
+        size_t ni;
+        for (ni = 0u; ni < nsym; ++ni) {
+            ref_rms_sq += ref[ni].re * ref[ni].re + ref[ni].im * ref[ni].im;
+            sig_rms_sq += sig_norm[ni].re * sig_norm[ni].re + sig_norm[ni].im * sig_norm[ni].im;
+        }
+        if (sig_rms_sq > 0.0 && ref_rms_sq > 0.0) {
+            double ns = sqrt(ref_rms_sq / sig_rms_sq);
+            for (ni = 0u; ni < nsym; ++ni) {
+                sig_norm[ni].re *= ns;
+                sig_norm[ni].im *= ns;
+            }
+        }
+    }
+    write_constellation_csv(csv_path, ref, sig_norm, nsym);
     /* Generate constellation SVG for dense output matching old version */
     if (1) {
-        write_constellation_svg(svg_path, constellation_template, constellation_count, ref, sig, nsym, title);
+        write_constellation_svg(svg_path, constellation_template, constellation_count, ref, sig_norm, nsym, title);
     }
+    free(sig_norm);
 }
 
 
@@ -2204,137 +2224,11 @@ int write_spectrum_svg(const char* path, const double* freq_hz, const double* ma
     return 0;
 }
 
-int write_dual_spectrum_svg(const char* path, const double* freq_hz,
-                            const double* mag1_dB, const double* mag2_dB,
-                            size_t n_bins, double fs_hz, const char* title) {
-    FILE* f;
-    size_t i;
-    const int width = 980, height = 760, ml = 80, mr = 30, mt = 50, mb = 80;
-    const double plot_w = (double)(width - ml - mr);
-    const double plot_h = (double)(height - mt - mb);
-
-    if (!path || !freq_hz || !mag1_dB || !mag2_dB || n_bins == 0u) return -1;
-
-    double min_mag = mag1_dB[0], max_mag = mag1_dB[0];
-    for (i = 1u; i < n_bins; i++) {
-        if (mag1_dB[i] < min_mag) min_mag = mag1_dB[i];
-        if (mag1_dB[i] > max_mag) max_mag = mag1_dB[i];
-        if (mag2_dB[i] < min_mag) min_mag = mag2_dB[i];
-        if (mag2_dB[i] > max_mag) max_mag = mag2_dB[i];
-    }
-    double y_max = ceil(max_mag / 10.0) * 10.0 + 10.0;
-    double y_min = floor(min_mag / 10.0) * 10.0 - 10.0;
-    if (y_max - y_min < 80.0) y_min = y_max - 80.0;
-    const double y_span = y_max - y_min;
-    const double y_scale = plot_h / y_span;
-    double f_min = 0.0, f_max, x_scale;
-
-    f_max = (fs_hz > 0.0) ? fs_hz / 2.0 : freq_hz[n_bins - 1u];
-    if (fs_hz <= 0.0 && fabs(freq_hz[0]) > 0.0) f_min = freq_hz[0];
-    if (f_max <= 0.0) f_max = 1.0;
-    x_scale = plot_w / (f_max - f_min);
-
-    f = fopen(path, "w");
-    if (!f) return -2;
-
-    fprintf(f, "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"%d\" height=\"%d\" viewBox=\"0 0 %d %d\">\n", width, height, width, height);
-    fprintf(f, "<rect width=\"100%%\" height=\"100%%\" fill=\"#f8fafc\"/>\n");
-    fprintf(f, "<text x=\"%d\" y=\"30\" font-family=\"sans-serif\" font-size=\"24\" fill=\"#111827\">%s</text>\n", ml, title ? title : "Spectrum (I/Q)");
-    fprintf(f, "<rect x=\"%d\" y=\"%d\" width=\"%.2f\" height=\"%.2f\" fill=\"white\" stroke=\"#d1d5db\"/>\n", ml, mt, plot_w, plot_h);
-
-    /* Horizontal grid lines at 10 dB */
-    {
-        double ds = ceil(y_min / 10.0) * 10.0;
-        double de = floor(y_max / 10.0) * 10.0;
-        for (double dv = ds; dv <= de + 0.01; dv += 10.0) {
-            double y = (double)(height - mb) - (dv - y_min) * y_scale;
-            fprintf(f, "<line x1=\"%d\" y1=\"%.2f\" x2=\"%d\" y2=\"%.2f\" stroke=\"%s\" stroke-width=\"1\"/>\n", ml, y, width - mr, y, fmod(dv, 30.0) < 0.001 ? "#cbd5e1" : "#e5e7eb");
-            fprintf(f, "<text x=\"%d\" y=\"%.2f\" text-anchor=\"end\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%.0f</text>\n", ml - 8, y + 4.0, dv);
-        }
-    }
-
-    /* Vertical grid lines */
-    {
-        double span = f_max - f_min, step;
-        double nice[] = {1e3,2e3,5e3,10e3,20e3,50e3,100e3,200e3,500e3,1e6,2e6,5e6,10e6,20e6,50e6};
-        size_t ns = sizeof(nice)/sizeof(nice[0]), si;
-        for (step = nice[0], si = 0u; si < ns; si++) {
-            if (span/nice[si] <= 8.0 && span/nice[si] >= 3.0) { step = nice[si]; break; }
-        }
-        if (span/step > 8.0 || span/step < 3.0) step = span/6.0;
-        double fv = floor(f_min/step)*step;
-        if (fv < f_min) fv += step;
-        for (; fv <= f_max+step*0.01; fv += step) {
-            double x = (double)ml + (fv-f_min)*x_scale;
-            if (x > (double)(width-mr)+0.5) break;
-            fprintf(f, "<line x1=\"%.2f\" y1=\"%d\" x2=\"%.2f\" y2=\"%d\" stroke=\"#e5e7eb\" stroke-width=\"1\"/>\n", x, mt, x, height-mb);
-            double af = fv < 0 ? -fv : fv;
-            const char *sign = fv < 0 ? "-" : "";
-            if (af >= 1e6) fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%s%.1fM</text>\n", x, (double)(height-mb+18), sign, af/1e6);
-            else if (af >= 1e3) fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%s%.0fk</text>\n", x, (double)(height-mb+18), sign, af/1e3);
-            else fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"12\" fill=\"#475569\">%.0f</text>\n", x, (double)(height-mb+18), fv);
-        }
-    }
-
-    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Frequency (Hz)</text>\n", (double)(ml+(int)plot_w/2), (double)(height-28));
-    fprintf(f, "<text transform=\"translate(24,%.2f) rotate(-90)\" text-anchor=\"middle\" font-family=\"sans-serif\" font-size=\"15\" fill=\"#111827\">Magnitude (dB)</text>\n", (double)(mt+(int)plot_h/2));
-
-    /* Filled region under I trace */
-    fprintf(f, "<polygon fill=\"#3b82f6\" fill-opacity=\"0.10\" stroke=\"none\" points=\"");
-    fprintf(f, "%.2f,%.2f ", (double)ml, (double)(height-mb));
-    for (i = 0u; i < n_bins; i++) {
-        double x = (double)ml + (freq_hz[i]-f_min)*x_scale;
-        double c = mag1_dB[i] < y_min ? y_min : (mag1_dB[i] > y_max ? y_max : mag1_dB[i]);
-        double y = (double)(height-mb) - (c-y_min)*y_scale;
-        if (x >= ml && x <= width-mr) fprintf(f, "%.2f,%.2f ", x, y);
-    }
-    { double lx = (double)ml + (freq_hz[n_bins-1]-f_min)*x_scale; if (lx > width-mr) lx = width-mr; fprintf(f, "%.2f,%.2f ", lx, (double)(height-mb)); }
-    fprintf(f, "\"/>\n");
-
-    /* I trace line */
-    fprintf(f, "<polyline fill=\"none\" stroke=\"#3b82f6\" stroke-width=\"1.5\" points=\"");
-    for (i = 0u; i < n_bins; i++) {
-        double x = (double)ml + (freq_hz[i]-f_min)*x_scale;
-        double c = mag1_dB[i] < y_min ? y_min : (mag1_dB[i] > y_max ? y_max : mag1_dB[i]);
-        double y = (double)(height-mb) - (c-y_min)*y_scale;
-        if (x >= ml && x <= width-mr) fprintf(f, "%.2f,%.2f ", x, y);
-    }
-    fprintf(f, "\"/>\n");
-
-    /* Q trace line (orange) */
-    fprintf(f, "<polyline fill=\"none\" stroke=\"#f97316\" stroke-width=\"1.5\" points=\"");
-    for (i = 0u; i < n_bins; i++) {
-        double x = (double)ml + (freq_hz[i]-f_min)*x_scale;
-        double c = mag2_dB[i] < y_min ? y_min : (mag2_dB[i] > y_max ? y_max : mag2_dB[i]);
-        double y = (double)(height-mb) - (c-y_min)*y_scale;
-        if (x >= ml && x <= width-mr) fprintf(f, "%.2f,%.2f ", x, y);
-    }
-    fprintf(f, "\"/>\n");
-
-    /* Legend */
-    fprintf(f, "<line x1=\"%.2f\" y1=\"%.2f\" x2=\"%.2f\" y2=\"%.2f\" stroke=\"#3b82f6\" stroke-width=\"2\"/>\n", ml+18.0, mt+20.0, ml+38.0, mt+20.0);
-    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">I</text>\n", (double)ml+44.0, (double)mt+24.0);
-    fprintf(f, "<line x1=\"%.2f\" y1=\"%.2f\" x2=\"%.2f\" y2=\"%.2f\" stroke=\"#f97316\" stroke-width=\"2\"/>\n", ml+76.0, mt+20.0, ml+96.0, mt+20.0);
-    fprintf(f, "<text x=\"%.2f\" y=\"%.2f\" font-family=\"sans-serif\" font-size=\"13\" fill=\"#111827\">Q</text>\n", (double)ml+102.0, (double)mt+24.0);
-
-    fprintf(f, "</svg>\n");
-    fclose(f);
-    return 0;
-}
-
-
 void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* file_prefix, size_t stage_number, int is_input, const char* raw_stage_name, const StageMetric* metric, const Complex* sig, size_t nsym, double fs_hz, double signal_hz, double display_window_us) {
-    static Complex* rf_prev_postmix_window = NULL;
-    static size_t rf_prev_postmix_n = 0u;
     char svg_path[1024];
     char title[384];
     StageRenderInfo info;
-    const int is_rf_postmix_stage = (!is_input && file_prefix && strcmp(file_prefix, "rf") == 0 && stage_number >= 6u);
-    const int is_limiter_stage = (raw_stage_name && strstr(raw_stage_name, "limiter") != NULL);
     const size_t trace_window_samples = trace_zoom_window_samples(nsym, fs_hz, stage_number, is_input, signal_hz, display_window_us);
-    const size_t window_n = (trace_window_samples > 1u && trace_window_samples < nsym) ? trace_window_samples : nsym;
-    const Complex* overlay_sig = NULL;
-    size_t overlay_n = 0u;
     if (!svg_run_dir || !file_prefix || !sig || nsym == 0) return;
     build_stage_render_info(raw_stage_name, metric, &info);
     if(is_input) {
@@ -2345,26 +2239,8 @@ void write_complex_trace_stage_artifacts(const char* svg_run_dir, const char* fi
         snprintf(title, sizeof(title), "Stage %02zu - %.120s Trace", stage_number, info.stage_label);
     }
 
-    if (is_rf_postmix_stage && !is_limiter_stage && stage_number >= 7u && rf_prev_postmix_window && rf_prev_postmix_n > 1u) {
-        overlay_sig = rf_prev_postmix_window;
-        overlay_n = rf_prev_postmix_n;
-    }
-
     {
         const size_t trace_render_points = (stage_number >= 6u) ? 400u : 8000u;  /* 8000 render points for smooth interpolation on all stages */
-        write_complex_trace_svg(svg_path, sig, nsym, trace_render_points, title, fs_hz, trace_window_samples, overlay_sig, overlay_n, "Previous stage");
-    }
-
-    if (is_rf_postmix_stage && window_n > 1u) {
-        if (rf_prev_postmix_n != window_n) {
-            Complex* resized = (Complex*)realloc(rf_prev_postmix_window, window_n * sizeof(Complex));
-            if (resized) {
-                rf_prev_postmix_window = resized;
-                rf_prev_postmix_n = window_n;
-            }
-        }
-        if (rf_prev_postmix_window && rf_prev_postmix_n == window_n) {
-            memcpy(rf_prev_postmix_window, sig, window_n * sizeof(Complex));
-        }
+        write_complex_trace_svg(svg_path, sig, nsym, trace_render_points, title, fs_hz, trace_window_samples, NULL, 0u, "Previous stage");
     }
 }

@@ -2,7 +2,7 @@
  * main.c — 64-APSK Receiver Dual-Mode Simulator (Orchestrator)
  *
  * Thin orchestrator that delegates to extracted modules:
- *   constellation, metrics, cli_args, output_mgr, signal_chain, sim_baseband, prng
+ *   constellation, metrics, output_mgr, signal_chain, sim_baseband, prng
  *
  * The RF simulation code (simulate_bruteforce_rf, simulate_realistic_rf) and
  * their supporting SoA/FFT helpers remain here because they were too tightly
@@ -24,7 +24,6 @@
 #include <time.h>
 
 /* --- Extracted module headers --- */
-#include "cli_args.h"
 #include "constellation.h"
 #include "math_utils.h"
 #include "metrics.h"
@@ -226,6 +225,19 @@ static StageMetric apply_stage_real_fused(const StageModel *stg,
   int has_am_pm = (stg->am_pm_coeff != 0.0);
   double p1db_threshold_v2 = has_p1db ? ip1db_v2 : 0.0;
 
+  /* Rapp smooth compression (p = 3, 2p = 6), voltage domain:
+   *   comp(r) = (1 + (r/rs)^6)^(-1/6)
+   * with rs calibrated so compression at the input P1dB voltage r1 is
+   * exactly -1 dB:  alpha = 10^(-1/20), rs = r1 * (alpha^-6 - 1)^(-1/6).
+   * All constants are hoisted out of the per-sample loop. */
+  double rapp_inv_rs6 = 0.0;
+  if (has_p1db) {
+    const double alpha = pow(10.0, -1.0 / 20.0); /* -1 dB voltage ratio */
+    const double r1 = sqrt(ip1db_v2);            /* voltage at input P1dB */
+    const double rs = r1 * pow(pow(alpha, -6.0) - 1.0, -1.0 / 6.0);
+    rapp_inv_rs6 = pow(rs, -6.0);
+  }
+
   double sigma = (pn_add > 0.0) ? sqrt(pn_add) : 0.0;
   int has_limiter = stg->is_limiter;
   const double max_amp = 10.0;
@@ -252,9 +264,10 @@ static StageMetric apply_stage_real_fused(const StageModel *stg,
         s_scale *= (1.0 - comp);
       }
       if (has_p1db) {
-        if (p_in > (ip1db_v2 * 0.794)) {
-          s_scale *= sqrt(ip1db_v2 / p_in);
-        }
+        /* r^6 == p_in^3 (r = |sample| amplitude, p_in = r^2) */
+        double rapp_comp =
+            pow(1.0 + p_in * p_in * p_in * rapp_inv_rs6, -1.0 / 6.0);
+        s_scale *= rapp_comp;
       }
     }
     if (has_am_pm) {
@@ -814,8 +827,8 @@ static double mean_noise_power_soa(const double *restrict sig_re,
 static StageMetric apply_stage_soa(
     const StageModel *stg, double *restrict ref_re, double *restrict ref_im,
     double *restrict sig_re, double *restrict sig_im, size_t n,
-    const char *domain, double N_t0_W, double *N_current, double *Gain_total,
-    double P_sig_in_W) {
+    const char *domain, double N_t0_W, double fs_bb, double *N_current,
+    double *Gain_total, double P_sig_in_W) {
   double amp_gain, g_lin, F, pn_add, N_t0_v2;
   size_t i;
 
@@ -833,6 +846,17 @@ static StageMetric apply_stage_soa(
       ip1db_v2 = ip1db_w * R_LOAD_OHM;
     }
 
+    /* Rapp smooth compression (p = 3, 2p = 6), voltage domain:
+     *   comp(r) = (1 + (r/rs)^6)^(-1/6), rs calibrated so compression at
+     * the input P1dB voltage r1 is exactly -1 dB.  Constants hoisted. */
+    double rapp_inv_rs6 = 0.0;
+    if (stg->p1db_dbm != INFINITY) {
+      const double alpha = pow(10.0, -1.0 / 20.0);
+      const double r1 = sqrt(ip1db_v2);
+      const double rs = r1 * pow(pow(alpha, -6.0) - 1.0, -1.0 / 6.0);
+      rapp_inv_rs6 = pow(rs, -6.0);
+    }
+
 #pragma omp parallel for schedule(static)
     for (i = 0; i < n; i++) {
       double p_in_inst = ref_re[i] * ref_re[i] + ref_im[i] * ref_im[i];
@@ -843,8 +867,11 @@ static StageMetric apply_stage_soa(
         s *= (1.0 - comp);
       }
       if (stg->p1db_dbm != INFINITY) {
-        if (p_in_inst > (ip1db_v2 * 0.794))
-          s *= sqrt(ip1db_v2 / p_in_inst);
+        /* r^6 == p_in_inst^3 (r = |sample| amplitude, p_in_inst = r^2) */
+        double rapp_comp =
+            pow(1.0 + p_in_inst * p_in_inst * p_in_inst * rapp_inv_rs6,
+                -1.0 / 6.0);
+        s *= rapp_comp;
       }
       ref_re[i] *= s;
       ref_im[i] *= s;
@@ -860,8 +887,11 @@ static StageMetric apply_stage_soa(
         s *= (1.0 - comp);
       }
       if (stg->p1db_dbm != INFINITY) {
-        if (p_in_inst > (ip1db_v2 * 0.794))
-          s *= sqrt(ip1db_v2 / p_in_inst);
+        /* r^6 == p_in_inst^3 (r = |sample| amplitude, p_in_inst = r^2) */
+        double rapp_comp =
+            pow(1.0 + p_in_inst * p_in_inst * p_in_inst * rapp_inv_rs6,
+                -1.0 / 6.0);
+        s *= rapp_comp;
       }
       sig_re[i] *= s;
       sig_im[i] *= s;
@@ -877,7 +907,12 @@ static StageMetric apply_stage_soa(
   /* --- STEP 2: NOISE INJECTION --- */
   F = db_to_lin_power(stg->nf_db);
   if (F < 1.0) F = 1.0;
-  pn_add = N_t0_v2 * g_lin * (F - 1.0);
+  /* Complex baseband sampled at fs_bb spans a TWO-SIDED bandwidth fs_bb, so
+   * the per-sample variance must be scaled by (fs_bb / B_NOISE_HZ) to keep
+   * the noise density equal to kT0*g*(F-1) W/Hz over the receiver bandwidth
+   * (the real path scales by fs/(2*B) because a real signal spans fs/2). */
+  double bw_scale = (fs_bb > 0.0) ? (fs_bb / B_NOISE_HZ) : 1.0;
+  pn_add = N_t0_v2 * g_lin * (F - 1.0) * bw_scale;
   if (pn_add > 0.0) {
     add_awgn_soa(sig_re, sig_im, n, pn_add);
   }
@@ -954,8 +989,20 @@ static void env_to_rf_soa(const double *restrict env_re,
 
 /* --- SoA downconversion --- */
 
+/*
+ * Mix-down the real RF signal to complex baseband using I/Q demodulation.
+ *
+ * The 2x factor in the I/Q mixing compensates for the cos*cos = 0.5 identity
+ * of the downconversion itself. When the input RF signal has ALREADY been
+ * through a mixer stage (cos(LO) applied in apply_stage_real_fused), an
+ * additional 0.5x factor is present, so the compensation must be doubled.
+ *   - downconv_gain = 2.0 : direct downconversion (no prior mixing)
+ *   - downconv_gain = 4.0 : downconversion after one mixer stage
+ *   - downconv_gain = 2 * 2^N : N cascaded mixer stages
+ */
 static size_t mix_down_soa(const double *restrict rf, size_t n, double fs_hz,
-                           double fc_hz, double cutoff_hz, size_t dec_factor,
+                           double fc_hz, double downconv_gain,
+                           double cutoff_hz, size_t dec_factor,
                            double *restrict bb_re, double *restrict bb_im,
                            double *restrict i_raw, double *restrict q_raw) {
   const double dtheta = 2.0 * M_PI * fc_hz / fs_hz;
@@ -964,13 +1011,14 @@ static size_t mix_down_soa(const double *restrict rf, size_t n, double fs_hz,
   double i_state = 0.0, q_state = 0.0;
 
   if (cutoff_hz <= 0.0) cutoff_hz = fs_hz / 16.0;
+  if (downconv_gain <= 0.0) downconv_gain = 2.0;
   alpha = exp(-2.0 * M_PI * cutoff_hz / fs_hz);
 
 #pragma omp parallel for schedule(static)
   for (i = 0; i < n; ++i) {
     double theta = (double)i * dtheta;
-    i_raw[i] = 2.0 * rf[i] * cos(theta);
-    q_raw[i] = -2.0 * rf[i] * sin(theta);
+    i_raw[i] = downconv_gain * rf[i] * cos(theta);
+    q_raw[i] = -downconv_gain * rf[i] * sin(theta);
   }
 
   for (i = 0; i < n; ++i) {
@@ -1269,8 +1317,18 @@ static int simulate_bruteforce_rf(
     memcpy(env_noisy_im, env_im, nrf * sizeof(double));
 
     {
+      /* The complex envelope sampled at fs_hz spans a TWO-SIDED bandwidth
+       * fs_hz, so white per-sample variance sigma^2 has density sigma^2/fs
+       * [V^2/Hz]. Requiring in-band power kT_ant*W over any bandwidth W
+       * forces sigma^2 = kT_ant*R*fs, i.e. scale the kT_ant*B*R power by
+       * (fs_hz / B_NOISE_HZ) (B cancels numerically but is kept symbolic).
+       * Mirrors apply_stage_soa's fs_bb/B and apply_stage_real_fused's
+       * fs/(2B) conventions. */
+      const double noise_bw_scale =
+          (fs_hz > 0.0) ? (fs_hz / B_NOISE_HZ) : 1.0;
       const double P_noise_v2 =
-          K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ * R_LOAD_OHM;
+          K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ * R_LOAD_OHM *
+          noise_bw_scale;
       add_awgn_soa(env_noisy_re, env_noisy_im, nrf, P_noise_v2);
     }
 
@@ -1295,9 +1353,9 @@ static int simulate_bruteforce_rf(
 
     {
       const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, 2.0, cutoff_hz,
                    dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
-      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, 2.0, cutoff_hz,
                    dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
       /* Pack SoA → Complex for synchronize_and_downsample */
@@ -1329,6 +1387,7 @@ static int simulate_bruteforce_rf(
 
   /* Step 6: Process through RF frontend stages */
   double current_center_hz = cfg->carrier_hz;
+  double current_downconv_gain = 2.0;  /* Direct downconv: cos*cos=0.5 → 2x */
   for (i = 0u; i < rf_stage_count; ++i) {
     StageModel stage = rf_stages[i];
 
@@ -1337,6 +1396,7 @@ static int simulate_bruteforce_rf(
                          cfg->carrier_hz, &N_current, &Gain_total, P_sig_in_W);
     if (stage.lo_hz > 0.0) {
       current_center_hz = fabs(current_center_hz - stage.lo_hz);
+      current_downconv_gain *= 2.0;  /* Each mixer adds 0.5x factor */
     }
     metrics[m].signal_power =
         P_sig_in_W * Gain_total; /* Align with Friis model */
@@ -1356,9 +1416,9 @@ static int simulate_bruteforce_rf(
     /* Generate Constellation & EVM for all RF Stages (SoA) -- baseline */
     {
       const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-      mix_down_soa(rf_ref, nrf, fs_hz, current_center_hz, cutoff_hz,
+      mix_down_soa(rf_ref, nrf, fs_hz, current_center_hz, current_downconv_gain, cutoff_hz,
                    dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
-      mix_down_soa(rf_sig, nrf, fs_hz, current_center_hz, cutoff_hz,
+      mix_down_soa(rf_sig, nrf, fs_hz, current_center_hz, current_downconv_gain, cutoff_hz,
                    dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
       pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
@@ -1390,9 +1450,9 @@ static int simulate_bruteforce_rf(
   /* Step 7: Downconvert RF → complex baseband — SoA */
   {
     const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-    mix_down_soa(rf_ref, nrf, fs_hz, current_center_hz, cutoff_hz,
+    mix_down_soa(rf_ref, nrf, fs_hz, current_center_hz, current_downconv_gain, cutoff_hz,
                  dec_factor, bb_ref_re, bb_ref_im, i_raw, q_raw);
-    mix_down_soa(rf_sig, nrf, fs_hz, current_center_hz, cutoff_hz,
+    mix_down_soa(rf_sig, nrf, fs_hz, current_center_hz, current_downconv_gain, cutoff_hz,
                  dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
   }
 
@@ -1575,7 +1635,8 @@ static int simulate_bruteforce_rf(
      */
 
     apply_stage_soa(&stage, bb_ref_re, bb_ref_im, bb_sig_re, bb_sig_im, nbb,
-                    "rf_to_bb", N_t0_W, &N_current, &Gain_total, P_sig_in_W);
+                    "rf_to_bb", N_t0_W, fs_hz / (double)dec_factor,
+                    &N_current, &Gain_total, P_sig_in_W);
 
     {
       double bb_fs = fs_hz / (double)dec_factor;
@@ -1608,14 +1669,6 @@ static int simulate_bruteforce_rf(
       free(freq); free(mag);
     }
 
-    /* Write trace using continuous baseband waveform (match stage 6 format) */
-    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
-    if (i < bb_stage_count - 1u) {
-      write_complex_trace_stage_artifacts(
-          trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
-          temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
-    }
-
     /* Downsample for metrics */
     pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
     size_t ref_eval_n = synchronize_and_downsample(
@@ -1634,6 +1687,14 @@ static int simulate_bruteforce_rf(
     metrics[m].is_limiter = stage.is_limiter;
     if (N_current > 0.0) {
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
+    }
+
+    /* Write trace using continuous baseband waveform (match stage 6 format) */
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    if (i < bb_stage_count - 1u) {
+      write_complex_trace_stage_artifacts(
+          trace_dir, "traces", rf_stage_count + 2u + i, 0, stage.name, &metrics[m],
+          temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
     }
 
     if (i < bb_stage_count - 1u) {
@@ -1724,6 +1785,7 @@ static int simulate_realistic_rf(
   size_t nrf;
   size_t m = 0u;
   size_t i;
+  int rc = 0; /* return code: 0 on success, -1 on cleanup-path failure */
 
   const double N_t0_W = K_BOLTZMANN * cfg->t0_k * B_NOISE_HZ;
   double N_current = K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ;
@@ -1844,6 +1906,7 @@ static int simulate_realistic_rf(
     tx_lo_pn.sample_rate_hz = fs_hz;
     if (phase_noise_init(&tx_lo_pn) != 0) {
       fprintf(stderr, "Failed to init TX LO phase noise\n");
+      rc = -1;
       goto cleanup;
     }
 
@@ -1856,6 +1919,7 @@ static int simulate_realistic_rf(
     rx_lo_pn.sample_rate_hz = fs_hz;
     if (phase_noise_init(&rx_lo_pn) != 0) {
       fprintf(stderr, "Failed to init RX LO phase noise\n");
+      rc = -1;
       goto cleanup;
     }
 
@@ -1875,6 +1939,7 @@ static int simulate_realistic_rf(
     flicker_cfg.sample_rate_hz = fs_hz / (double)dec_factor;
     if (flicker_noise_init(&flicker_cfg) != 0) {
       fprintf(stderr, "Failed to init flicker noise\n");
+      rc = -1;
       goto cleanup;
     }
 
@@ -1884,6 +1949,7 @@ static int simulate_realistic_rf(
     adc_cfg.jitter_ps = 1.0;
     if (adc_model_init(&adc_cfg) != 0) {
       fprintf(stderr, "Failed to init ADC model\n");
+      rc = -1;
       goto cleanup;
     }
 
@@ -1896,6 +1962,7 @@ static int simulate_realistic_rf(
       bq_cfg.order = 4;
       if (biquad_init(&bb_filter_state, &bq_cfg) != 0) {
         fprintf(stderr, "Failed to init biquad filter\n");
+        rc = -1;
         goto cleanup;
       }
     }
@@ -1927,14 +1994,27 @@ static int simulate_realistic_rf(
     double *env_noisy_re = ALLOC_ALIGNED_D(nrf);
     double *env_noisy_im = ALLOC_ALIGNED_D(nrf);
     if (!env_noisy_re || !env_noisy_im) {
+      free(env_noisy_re);
+      free(env_noisy_im);
+      rc = -1;
       goto cleanup;
     }
     memcpy(env_noisy_re, env_re, nrf * sizeof(double));
     memcpy(env_noisy_im, env_im, nrf * sizeof(double));
 
     {
+      /* The complex envelope sampled at fs_hz spans a TWO-SIDED bandwidth
+       * fs_hz, so white per-sample variance sigma^2 has density sigma^2/fs
+       * [V^2/Hz]. Requiring in-band power kT_ant*W over any bandwidth W
+       * forces sigma^2 = kT_ant*R*fs, i.e. scale the kT_ant*B*R power by
+       * (fs_hz / B_NOISE_HZ) (B cancels numerically but is kept symbolic).
+       * Mirrors apply_stage_soa's fs_bb/B and apply_stage_real_fused's
+       * fs/(2B) conventions. */
+      const double noise_bw_scale =
+          (fs_hz > 0.0) ? (fs_hz / B_NOISE_HZ) : 1.0;
       const double P_noise_v2 =
-          K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ * R_LOAD_OHM;
+          K_BOLTZMANN * cfg->antenna_temp_k * B_NOISE_HZ * R_LOAD_OHM *
+          noise_bw_scale;
       add_awgn_soa(env_noisy_re, env_noisy_im, nrf, P_noise_v2);
     }
 
@@ -1977,9 +2057,9 @@ static int simulate_realistic_rf(
 
     {
       const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_ref, nrf, fs_hz, cfg->carrier_hz, 2.0, cutoff_hz,
                    dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
-      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, cutoff_hz,
+      mix_down_soa(rf_sig, nrf, fs_hz, cfg->carrier_hz, 2.0, cutoff_hz,
                    dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
       pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
@@ -2010,6 +2090,7 @@ static int simulate_realistic_rf(
 
   /* Step 7: Process through RF frontend stages with AM-to-PM */
   double realistic_center_hz = cfg->carrier_hz;
+  double realistic_downconv_gain = 2.0;
   for (i = 0u; i < rf_stage_count; ++i) {
     StageModel stage = rf_stages[i];
 
@@ -2018,6 +2099,7 @@ static int simulate_realistic_rf(
                          cfg->carrier_hz, &N_current, &Gain_total, P_sig_in_W);
     if (stage.lo_hz > 0.0) {
       realistic_center_hz = fabs(realistic_center_hz - stage.lo_hz);
+      realistic_downconv_gain *= 2.0;
     }
     metrics[m].signal_power = P_sig_in_W * Gain_total;
     write_trace_stage_artifacts(csv_dir, trace_dir, "traces", i + 1u, 0,
@@ -2036,9 +2118,9 @@ static int simulate_realistic_rf(
 
     {  /* Generate Constellation & EVM for realistic path */
       const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-      mix_down_soa(rf_ref, nrf, fs_hz, realistic_center_hz, cutoff_hz,
+      mix_down_soa(rf_ref, nrf, fs_hz, realistic_center_hz, realistic_downconv_gain, cutoff_hz,
                    dec_factor, temp_bb_ref_re, temp_bb_ref_im, i_raw, q_raw);
-      mix_down_soa(rf_sig, nrf, fs_hz, realistic_center_hz, cutoff_hz,
+      mix_down_soa(rf_sig, nrf, fs_hz, realistic_center_hz, realistic_downconv_gain, cutoff_hz,
                    dec_factor, temp_bb_sig_re, temp_bb_sig_im, i_raw, q_raw);
 
       pack_complex(temp_bb_ref_re, temp_bb_ref_im, nbb, temp_complex_buf);
@@ -2070,9 +2152,11 @@ static int simulate_realistic_rf(
   /* Step 8: Downconvert RF → complex baseband — SoA */
   {
     const double cutoff_hz = 5.0 * cfg->symbol_rate_hz;
-    mix_down_soa(rf_ref, nrf, fs_hz, realistic_center_hz, cutoff_hz,
+    const double downconv_gain =
+        (realistic_center_hz != cfg->carrier_hz) ? realistic_downconv_gain : 2.0;
+    mix_down_soa(rf_ref, nrf, fs_hz, realistic_center_hz, downconv_gain, cutoff_hz,
                  dec_factor, bb_ref_re, bb_ref_im, i_raw, q_raw);
-    mix_down_soa(rf_sig, nrf, fs_hz, realistic_center_hz, cutoff_hz,
+    mix_down_soa(rf_sig, nrf, fs_hz, realistic_center_hz, downconv_gain, cutoff_hz,
                  dec_factor, bb_sig_re, bb_sig_im, i_raw, q_raw);
   }
 
@@ -2277,7 +2361,8 @@ static int simulate_realistic_rf(
     } else {
       /* Legacy path: use apply_stage_soa */
       apply_stage_soa(&stage, bb_ref_re, bb_ref_im, bb_sig_re, bb_sig_im, nbb,
-                      "rf_to_bb", N_t0_W, &N_current, &Gain_total, P_sig_in_W);
+                      "rf_to_bb", N_t0_W, fs_hz / (double)dec_factor,
+                      &N_current, &Gain_total, P_sig_in_W);
     }
 
     /* Add flicker noise to signal path */
@@ -2324,14 +2409,6 @@ static int simulate_realistic_rf(
       free(freq); free(mag);
     }
 
-    /* Write trace using continuous baseband waveform (match stage 6 format) -- realistic */
-    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
-    if (i < bb_stage_count - 1u) {
-      write_complex_trace_stage_artifacts(
-          trace_dir, "traces", rf_stage_count + 2u + i, 0, realistic_stage_name, &metrics[m],
-          temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
-    }
-
     /* Downsample for metrics */
     pack_complex(bb_ref_re, bb_ref_im, nbb, temp_complex_buf);
     size_t ref_eval_n = synchronize_and_downsample(
@@ -2355,6 +2432,14 @@ static int simulate_realistic_rf(
     /* Override with analytic Friis SNR */
     if (N_current > 0.0) {
       metrics[m].snr_db = lin_to_db((P_sig_in_W * Gain_total) / N_current);
+    }
+
+    /* Write trace using continuous baseband waveform (match stage 6 format) -- realistic */
+    pack_complex(bb_sig_re, bb_sig_im, nbb, temp_complex_buf);
+    if (i < bb_stage_count - 1u) {
+      write_complex_trace_stage_artifacts(
+          trace_dir, "traces", rf_stage_count + 2u + i, 0, realistic_stage_name, &metrics[m],
+          temp_complex_buf, nbb, fs_hz / (double)dec_factor, cfg->symbol_rate_hz, 10.0);
     }
 
     if (i < bb_stage_count - 1u) {
@@ -2421,7 +2506,7 @@ cleanup:
   flicker_noise_free(&flicker_cfg);
   adc_model_free(&adc_cfg);
 
-  return 0;
+  return rc;
 }
 
 /*
@@ -2519,6 +2604,10 @@ static int parse_double(const char *s, double *out) {
   errno = 0;
   v = strtod(s, &end);
   if (errno != 0 || end == s || *end != '\0') {
+    return -2;
+  }
+  if (!isfinite(v)) {
+    fprintf(stderr, "Invalid numeric value '%s' (must be finite)\n", s);
     return -2;
   }
 
@@ -2694,6 +2783,16 @@ int main(int argc, char **argv) {
   SimConfig cfg;               /* Top-level simulation parameters */
   StageModelsConfig stage_cfg; /* Loaded stage chain configuration */
   StageModelsConfig tx_stage_cfg; /* Transmitter stage chain configuration */
+
+  /* Deterministic output: the parallel PRNG streams are indexed by OpenMP
+   * thread id, so results must not depend on how many threads the runtime
+   * happens to spawn on a given load. Disable dynamic teams and pin a fixed
+   * thread count unless the user explicitly chose one via OMP_NUM_THREADS. */
+  omp_set_dynamic(0);
+  if (getenv("OMP_NUM_THREADS") == NULL) {
+    omp_set_num_threads(8);
+  }
+
   char stage_csv_path[512] =
       "data_input/20ghz/receiver.csv"; /* Default CSV path */
   char tx_stage_csv_path[512] =
@@ -2732,6 +2831,7 @@ int main(int argc, char **argv) {
   double rf_fs_used = 0.0;             /* RF sampling frequency used (output) */
   double realistic_fs_used = 0.0;      /* Realistic sampling frequency used (output) */
   int i;                               /* Loop variable for CLI parsing */
+  int snr_user_supplied = 0;           /* --snr explicitly given on CLI */
 
   /* Link budget variables */
   double noise_bw_hz;  /* Noise bandwidth (MATLAB-aligned 200 MHz) */
@@ -2793,6 +2893,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Invalid --snr value\n");
         return 2;
       }
+      snr_user_supplied = 1;
     } else if (strcmp(argv[i], "--stage-csv") == 0 && i + 1 < argc) {
       snprintf(stage_csv_path, sizeof(stage_csv_path), "%s", argv[++i]);
     } else if (strcmp(argv[i], "--tx-csv") == 0 && i + 1 < argc) {
@@ -2916,7 +3017,8 @@ int main(int argc, char **argv) {
   noise_w = K_BOLTZMANN * cfg.antenna_temp_k * noise_bw_hz;
   noise_dbm = lin_to_db(noise_w) + 30.0;
   /* Default input SNR — overridden after link budget computation */
-  cfg.input_snr_db = 20.0;
+  if (!snr_user_supplied)
+    cfg.input_snr_db = 20.0;
 
   /* --- Load receiver stage configuration from CSV --- */
   if (stage_models_load_csv(resolved_stage_csv_path, &stage_cfg, stage_err,
@@ -2989,7 +3091,7 @@ int main(int argc, char **argv) {
     PropagationScenario prop_scenario;
     LinkBudgetResult    prop_budget;
     CascadeParams       tmp_params;
-    CascadeResult       tmp_result;
+    CascadeResult       tmp_result = {0};
     double sensitivity_dbm = -70.0; /* fallback if cascade fails */
 
     /* Run cascade to get real sensitivity */
@@ -3024,7 +3126,8 @@ int main(int argc, char **argv) {
 
     /* Override simulation input SNR with real link budget received power */
     signal_dbm = prop_budget.rx_power_dbm;
-    cfg.input_snr_db = signal_dbm - noise_dbm;
+    if (!snr_user_supplied)
+      cfg.input_snr_db = signal_dbm - noise_dbm;
 
     /* Actual SNR at receiver:
      *   Ni = k · T_ant · B  (noise floor at antenna temperature)

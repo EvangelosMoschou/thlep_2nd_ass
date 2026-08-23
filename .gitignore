@@ -48,3 +48,12 @@ push_payload.json
 # Playwright cache
 .playwright-mcp/
 
+
+# AI-agent working directories and local scratch
+.omo/
+Temp folder/
+baseline_out/
+Screenshot from*.png
+matlab/octave-workspace
+matlab/out_monolithic/
+Correction_Instructions/

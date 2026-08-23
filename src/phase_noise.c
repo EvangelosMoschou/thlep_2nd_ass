@@ -9,7 +9,8 @@
  *     L(f) = white_floor + K2/f² + K3/f³
  *
  * DESIGN:
- *   Three parallel paths driven by prng_gauss():
+ *   Three parallel paths, each driven by its own independent prng_gauss()
+ *   draw (the PSD regions arise from physically independent mechanisms):
  *     1. White floor: direct scaled white noise
  *     2. 1/f² region: first-order IIR low-pass (corner = f2)
  *     3. 1/f³ region: first-order IIR low-pass (corner = f3)
@@ -76,15 +77,21 @@ int phase_noise_init(PhaseNoiseConfig* cfg) {
 }
 
 double phase_noise_generate(PhaseNoiseConfig* cfg, PrngState* prng) {
-    double w = prng_gauss(prng);
+    /* Independent Gaussian draws per branch: the three PSD regions arise
+     * from physically independent mechanisms (thermal floor vs resonator
+     * noise vs flicker upconversion), so sharing one sample would inject
+     * artificial cross-correlation between the branches. */
+    double w_white = prng_gauss(prng);
+    double w_f2 = prng_gauss(prng);
+    double w_f3 = prng_gauss(prng);
 
-    double white_out = cfg->white_gain * w;
+    double white_out = cfg->white_gain * w_white;
 
-    double f2_in = cfg->gain_1f2 * w;
+    double f2_in = cfg->gain_1f2 * w_f2;
     double f2_out = cfg->b2 * f2_in + cfg->a2 * cfg->state_f2;
     cfg->state_f2 = f2_out;
 
-    double f3_in = cfg->gain_1f3 * w;
+    double f3_in = cfg->gain_1f3 * w_f3;
     double f3_out = cfg->b3 * f3_in + cfg->a3 * cfg->state_f3;
     cfg->state_f3 = f3_out;
 
