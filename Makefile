@@ -2,7 +2,7 @@ CC ?= gcc
 CFLAGS ?= -O3 -std=c11 -Wall -Wextra -pedantic -Iinclude -fopenmp
 LDFLAGS ?= -lm -fopenmp
 
-SRC := main.c prng.c propagation.c cascade.c component_catalog.c stage_models.c stage_artifacts.c phase_noise.c adc_model.c iq_imbalance.c flicker_noise.c biquad_filter.c constellation.c metrics.c output_mgr.c signal_chain.c sim_baseband.c fft.c
+SRC := main.c sim_rf_paths.c prng.c propagation.c cascade.c component_catalog.c stage_models.c stage_artifacts.c phase_noise.c adc_model.c iq_imbalance.c flicker_noise.c biquad_filter.c constellation.c metrics.c output_mgr.c signal_chain.c sim_baseband.c fft.c
 BIN_DIR := bin
 OUT_DIR := out
 BIN := $(BIN_DIR)/dual_receiver_sim

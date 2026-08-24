@@ -3,7 +3,9 @@
 ## 1. Τι είναι αυτό το project
 
 Το `receiver_dual_sim` είναι ένας προσομοιωτής δέκτη για δορυφορικό downlink
-στα 24 GHz (K-band) με διαμόρφωση DVB-S2X 64-APSK. Υλοποιεί:
+στα 20 GHz (K-band) με διαμόρφωση DVB-S2X 64-APSK. *(Το project σχεδιάστηκε
+αρχικά στα 24 GHz· η βελτιστοποιημένη αλυσίδα λειτουργεί στα 20 GHz —
+default carrier στο `src/main.c`, δεδομένα στο `data_input/20ghz/`.)* Υλοποιεί:
 
 - **Μέρος Δ (Propagation Analysis)** — Απώλειες διάδοσης με πρότυπα ITU-R
 - **Μέρος Ε (Cascade Analysis)** — Ανάλυση αλυσίδας δέκτη (Friis, IP3, DR)
@@ -23,7 +25,7 @@
 | Παράμετρος | Τιμή | Επεξήγηση |
 |-----------|------|-----------|
 | Τροχιά | **GEO** | Γεωστατική, 36.000 km απόσταση |
-| Συχνότητα | **24.0 GHz** | K-band (εξόδου δέκτη) |
+| Συχνότητα | **20.0 GHz** | K-band (εξόδου δέκτη) |
 | Απόσταση | **36.000 km** | Τυπικό slant range για γεωστατικό |
 | Γωνία ανύψωσης | **44°** | Τυπική για Αθήνα |
 | Πόλωση | **45° (κυκλική)** | Συνηθισμένη σε SATCOM — προς επιβεβαίωση από ομάδα |
@@ -31,10 +33,10 @@
 | Κεραία δορυφόρου | **Beyond Gravity 0.6m** | All-metal reflector, ESA space-qualified |
 | Κέρδος κεραίας δορυφόρου | **~40 dBi** @ 25.5 GHz (41.0 dBi) | P_tx ≈ 45 dBm (32 W) για EIRP 85 dBm |
 | Κεραία εδάφους | **Viasat 13.5m** | Full-motion ground station |
-| Κέρδος κεραίας εδάφους | **~68 dBi** | Υπολογισμένο @ 24 GHz (βλ. §2.4) |
+| Κέρδος κεραίας εδάφους | **68.70 dBi** | Operative τιμή στο `main.c` — Viasat 13.5m, απόδοση διαφράγματος ~65% (βλ. §2.4) |
 | Θερμοκρασία θορύβου κεραίας | **91 K** | Σε γωνία ανύψωσης 44° (Viasat 13.5m, Athens→SES-17) |
 | Πόλωση | **Κυκλική** | RHCP/LHCP, axial ratio 0.5 dB |
-| Ευαισθησία δέκτη | **−61.88 dBm** | Υπολογισμένη από cascade analysis (Μέρος Ε) |
+| Ευαισθησία δέκτη | **−61.80 dBm** | Υπολογισμένη από cascade analysis (Μέρος Ε) |
 | Ρυθμός βροχής | **10 mm/h** | 0.01% exceedance, generic ITU reference |
 | Πίεση επιφάνειας | **1013.25 hPa** | Στάθμη θαλάσσης |
 | Θερμοκρασία | **288.15 K (15 °C)** | Standard |
@@ -72,12 +74,11 @@ ITU rain zones (0.01% exceedance):
 Για LEO δορυφόρο (π.χ. Starlink 550 km), η μετατόπιση και το Doppler
 θα ήταν σημαντικά και θα απαιτούσαν δυναμικό μοντέλο.
 
-### 2.4 Υπολογισμός κέρδους κεραίας στα 24 GHz
+### 2.4 Υπολογισμός κέρδους κεραίας εδάφους
 
 **Δορυφορική κεραία (Tx):** Beyond Gravity 0.6m, all-metal reflector
 - Band: 25.5–27.0 GHz
 - Boresight gain: 41.0 dBi @ 25.5 GHz, 41.3 dBi @ 27.0 GHz
-- Στα 24 GHz: ~40 dBi (εκτός ζώνης σχεδιασμού, εκτίμηση)
 - Πόλωση: RHCP/LHCP
 - Ισχύς πομπού: 45 dBm (32 W) για EIRP 85 dBm
 
@@ -86,22 +87,23 @@ ITU rain zones (0.01% exceedance):
 **Υπολογισμός:**
 
 ```
-Στα 24 GHz: λ = 0.0125 m, D = 13.5 m
+Στην κύρια ζώνη σχεδιασμού του σταθμού (K-band, λ = 0.0125 m), D = 13.5 m:
 Μέγιστο θεωρητικό κέρδος (100% απόδοση):
   G_max = 10·log₁₀((π·D/λ)²) = 10·log₁₀(3392.9²) ≈ 70.6 dBi
 
-Τυπική απόδοση διαφράγματος για 13.5m @ K-band:
-  η ≈ 50–60% → 67.4–68.2 dBi
+Απόδοση διαφράγματος η ≈ 65%:
+  G_eff = 70.6 + 10·log₁₀(0.65) = 70.6 − 1.87 ≈ 68.7 dBi
 
-Επιπλέον απώλειες τροφοδότη (~1.5 dB):
-  Στα 24 GHz: απώλειες προσαρμογής, spillover, phase center shift
-
-Τελική εκτίμηση: ~66.5 dBi (συντηρητική)
+Operative τιμή στο main.c: G_rx = 68.70 dBi
 ```
 
-**Επίδραση στο link budget:**
-- Παλιά (40 dBi): Rx power = 85 − 222.83 + 40 = −97.83 dBm → Margin = −35.94 dB
-- Νέα (62 dBi):  Rx power = 85 − 222.83 + 62 = −75.83 dBm → Margin = −13.95 dB
+**Επίδραση στο link budget (τρέχουσα αλυσίδα @ 20 GHz):**
+- P_rx = 85.00 − 215.59 + 68.70 = **−61.89 dBm**
+- Margin = −61.89 − (−61.80) = **−0.09 dB ✗ ανεπάρκες**
+
+*(Ιστορικό: στην αρχική μελέτη στα 24 GHz είχαν εξεταστεί τιμές ~40 dBi και
+~62 dBi με margin −35.94 dB και −13.95 dB αντίστοιχα — πλέον χρησιμοποιείται
+η βαθμονομημένη τιμή 68.70 dBi.)*
 
 ## 3. Δομή repository
 
@@ -122,7 +124,7 @@ receiver_dual_sim/
 │   ├── sim_baseband.c             ← Complex baseband analytical path
 │   ├── stage_models.c             ← CSV-driven stage chain loader
 │   ├── stage_artifacts.c          ← Δημιουργία SVG/CSV artifacts
-│   ├── phase_noise.c              ← Phase noise (IIR 3-region model)
+│   ├── phase_noise.c              ← Phase noise (IIR 3-region model, ανεξάρτητα Gaussian draws ανά κλάδο)
 │   ├── iq_imbalance.c             ← I/Q gain/phase error
 │   ├── flicker_noise.c            ← 1/f noise (Voss-McCartney)
 │   ├── adc_model.c                ← ADC quantization + jitter
@@ -131,7 +133,7 @@ receiver_dual_sim/
 │   ├── metrics.c                  ← SNR, EVM, mean power computations
 │   ├── cli_args.c                 ← CLI flag parsing
 │   ├── output_mgr.c               ← Directory creation/cleanup
-│   └── prng.c                     ← xoshiro256** PRNG + ziggurat Gaussian
+│   └── prng.c                     ← xoshiro256** PRNG + exact Box-Muller Gaussian (τα παλιά ziggurat tables ήταν στατιστικά άκυρα και αντικαταστάθηκαν)
 ├── include/                       ← Header files (ένα .h ανά module)
 ├── matlab/
 │   ├── sim_receiver_matlab.m      ← MATLAB reference simulation
@@ -163,7 +165,7 @@ main()
 ├── simulate_baseband()            ← Complex baseband path (προαιρετικό)
 ├── simulate_bruteforce_rf()       ← RF path (upconvert → stages → downconvert)
 │   ├─ RRC pulse shaping
-│   ├─ IQ upconversion @ 24 GHz
+│   ├─ IQ upconversion @ 20 GHz
 │   ├─ RF frontend stages (real)
 │   ├─ Downconversion to baseband
 │   └─ Post-mixer baseband stages
@@ -186,7 +188,7 @@ main()
 $$FSPL = \left(\frac{4\pi d f}{c}\right)^2$$
 Σε λογαριθμική κλίμακα (dB):
 $$\text{FSPL (dB)} = 92.45 + 20\log_{10}(f_{\text{GHz}}) + 20\log_{10}(d_{\text{km}})$$
-* **Συχνότητα ($f$):** $24.0 \text{ GHz}$ (K-band).
+* **Συχνότητα ($f$):** $20.0 \text{ GHz}$ (K-band).
 * **Απόσταση ($d$ - `distance_km`):** $36000.0 \text{ km}$ (GEO τροχιά).
 
 ### 5.2 Εξασθένηση Βροχής (Rain Attenuation - ITU-R P.838-3)
@@ -212,7 +214,7 @@ $$\gamma_w = \gamma_{w,\text{ref}} \cdot \left(\frac{\rho}{7.5}\right) \cdot \le
 $$A_{\text{gas}} = \frac{\gamma_o \cdot h_o + \gamma_w \cdot h_w}{\sin(\theta)}$$
 * **Πίεση Επιφάνειας ($P$ - `surface_pressure_hpa`):** **$1013.25\text{ hPa}$** (Sea level standard).
 * **Πυκνότητα Υδρατμών ($\rho$ - `water_vapor_gm3`):** **$7.5\text{ g/m}^3$** (Reference).
-* **Ισοδύναμα Ύψη ($h_o, h_w$):** $h_o = 6.0\text{ km}$ (οξυγόνο), $h_w = 2.0\text{ km}$ (υδρατμοί) στα 24 GHz.
+* **Ισοδύναμα Ύψη ($h_o, h_w$):** $h_o = 6.0\text{ km}$ (οξυγόνο), $h_w = 2.0\text{ km}$ (υδρατμοί) στα 20 GHz.
 * **Τιμές Αναφοράς:** $\gamma_{o,\text{ref}} = 0.0080\text{ dB/km}$, $\gamma_{w,\text{ref}} = 0.0850\text{ dB/km}$.
 
 ### 5.5 Κέρδος Κεραίας και Link Budget
@@ -225,6 +227,14 @@ $$\text{Margin} = P_{\text{rx}} - \text{Sensitivity} \quad \text{[dB]}$$
       $$G_{\text{max}} = 10\log_{10}\left(\left(\frac{\pi D}{\lambda}\right)^2\right) = 70.6\text{ dBi} \quad (\text{για } D=13.5\text{m}, \lambda=0.0125\text{m})$$
       Με απόδοση διαφράγματος $\eta \approx 65\%$:
       $$G_{\text{eff}} = 70.6 + 10\log_{10}(0.65) = 68.7\text{ dBi}$$
+
+**Αριθμητική αλυσίδα (τρέχουσα εκτέλεση @ 20 GHz):**
+
+```
+A_total = FSPL + Rain + Fog + Gas = 209.60 + 5.66 + 0.02 + 0.31 = 215.59 dB
+P_rx    = 85.00 − 215.59 + 68.70 = −61.89 dBm
+Margin  = −61.89 − (−61.80) = −0.09 dB  ✗ INSUFFICIENT
+```
 
 ---
 
@@ -247,14 +257,27 @@ $$\text{kTB (dBm)} = 10\log_{10}(k \cdot T_0 \cdot B \cdot 1000) \approx -90.96 
 * **Θερμοκρασία Αναφοράς ($T_0$):** $290.0\text{ K}$.
 * **Εύρος Ζώνης Θορύβου ($B$):** $200.0\text{ MHz}$.
 * **Απαιτούμενο SNR (DVB-S2X 64-APSK):** **$26.5\text{ dB}$**.
-* **Υπολογισμένη Ευαισθησία:** **$-61.88\text{ dBm}$** (για $\text{NF}_{\text{total}} = 2.58\text{ dB}$).
+* **Υπολογισμένη Ευαισθησία:** **$-61.80\text{ dBm}$** (για $\text{NF}_{\text{total}} = 2.67\text{ dB}$).
 
 ### 6.4 Δυναμικό Εύρος (Dynamic Range)
 * **Linear Dynamic Range (LDR):**
   $$\text{LDR} = P_{\text{1dB,out}} - N_0 \quad \text{[dB]}$$
 * **Spurious-Free Dynamic Range (SFDR):**
   $$\text{SFDR} = \frac{2}{3} ( \text{OIP3}_{\text{total}} - N_0 ) \quad \text{[dB]}$$
-  *(όπου $N_0$ είναι η ισχύς θορύβου εξόδου: $N_0 = k T_{\text{ant}} B G_{\text{total}} + \text{εσωτερικός θόρυβος} \approx -10.37\text{ dBm}$).*
+  *(όπου $N_0$ είναι η ισχύς θορύβου εξόδου: $N_0 = k T_{\text{ant}} B G_{\text{total}} + \text{εσωτερικός θόρυβος} \approx 61.26\text{ dBm}$ — output-referred, διογκωμένη από τη σύμβαση του σταδίου-κεραίας 67.20 dB ως τελευταίου κρίκου της αλυσίδας).*
+
+**Τρέχουσες τιμές cascade (Part E):**
+
+| Μεγέθος | Τιμή |
+|---------|------|
+| Total Gain | **151.57 dB** (περιλαμβάνει τη σειρά κεραίας 67.20 dB· μόνο ηλεκτρονικά ≈ 84.37 dB) |
+| Total NF | **2.67 dB** |
+| Total IIP3 | **−41.39 dBm** |
+| OIP3_total | **110.18 dBm** (= −41.39 + 151.57) |
+| Output P1dB | **99.58 dBm** |
+| Output noise $N_0$ | **61.26 dBm** |
+| LDR | **38.32 dB** (= 99.58 − 61.26) |
+| SFDR | **32.61 dB** (= $\frac{2}{3}$(110.18 − 61.26)) |
 
 Οι τιμές IIP3 και P1dB προέρχονται από τα **datasheets** μέσω του
 `component_catalog` module (LNA1 ADL8142S: OIP3=17.5 dBm, LNA2 SAV-541-DG+:
@@ -426,9 +449,9 @@ $$\text{OIP3}_{\text{total}} = \text{IIP3}_{\text{total}} + G_{\text{total}} \qu
 
 $$S_{\text{min}}(\text{dBm}) = \text{kT₀B}(\text{dBm}) + \text{NF}_{\text{total}}(\text{dB}) + \text{SNR}_{\text{req}}(\text{dB})$$
 
-Για το default configuration (NF = 2.58 dB):
+Για το default configuration (NF = 2.67 dB):
 
-$$S_{\text{min}} = -90.96 + 2.58 + 26.50 = -61.88 \, \text{dBm}$$
+$$S_{\text{min}} = -90.96 + 2.67 + 26.50 = -61.80 \, \text{dBm}$$
 
 ### 12.8 IIP3 → P1dB Approximation
 
@@ -441,6 +464,13 @@ $$\text{P1dB}_{\text{out}} = \text{P1dB}_{\text{in}} + G_{\text{total}} - 1.0 \q
 Η προσέγγιση των 9.6 dB είναι η τυπική σχέση για ενισχυτές
 (το P1dB είναι συνήθως 8-11 dB κάτω από το IIP3). Η αφαίρεση
 1.0 dB στο output αντιστοιχεί στο compression του κέρδους.
+
+> **Σημείωση (compression στην προσομοίωση):** Στο time-domain σήμα η
+> πεπερασμένη πλάκας δεν γίνεται πλέον με hard-threshold clamp αλλά με το
+> ομαλό μοντέλο **Rapp** ($p = 3$, $2p = 6$), στο πεδίο τάσης:
+> $$\text{comp}(r) = \left(1 + \left(\frac{r}{r_s}\right)^{6}\right)^{-1/6}$$
+> με $r_s$ βαθμονομημένο ώστε το compression στην τάση που αντιστοιχεί στο
+> input P1dB να ισούται ακριβώς με $-1$ dB.
 
 ### 12.9 Dynamic Range
 
@@ -480,9 +510,9 @@ $$L_{\text{fspl}}(\text{dB}) = 20 \log_{10}(4\pi) + 20 \log_{10}(d) + 20 \log_{1
 
 $$L_{\text{fspl}}(\text{dB}) = 92.45 + 20 \log_{10}(f_{\text{GHz}}) + 20 \log_{10}(d_{\text{km}})$$
 
-Για $f = 24$ GHz, $d = 35786$ km (GEO):
+Για $f = 20$ GHz, $d = 36000$ km (GEO):
 
-$$L_{\text{fspl}} = 92.45 + 20 \log_{10}(24) + 20 \log_{10}(35786) = 92.45 + 27.60 + 91.08 = 211.13 \, \text{dB}$$
+$$L_{\text{fspl}} = 92.45 + 20 \log_{10}(20) + 20 \log_{10}(36000) = 92.45 + 26.02 + 91.13 = 209.60 \, \text{dB}$$
 
 ### 12.12 Rain Attenuation (ITU-R P.838-3)
 
@@ -506,7 +536,7 @@ $$A_{\text{rain}} = \frac{\gamma_R \cdot h_R}{\sin\theta} \quad [\text{dB}]$$
 
 όπου $h_R \approx 4.0$ km το effective rain height (ITU-R P.839).
 
-Default: $R = 10$ mm/h (0.01% exceedance), $\theta = 30^\circ$.
+Default: $R = 10$ mm/h (0.01% exceedance), $\theta = 44^\circ$.
 
 ### 12.13 Fog/Cloud Attenuation (ITU-R P.840-9)
 
@@ -527,7 +557,7 @@ $$\gamma_c = K_l \cdot M \quad [\text{dB/km}]$$
 
 $$A_{\text{fog}} = \frac{\gamma_c}{\sin\theta} \quad [\text{dB}]$$
 
-Default: $M = 0.05$ g/m³ (medium fog, ~300m ορατότητα), $\theta = 30^\circ$.
+Default: $M = 0.05$ g/m³ (medium fog, ~300m ορατότητα), $\theta = 44^\circ$.
 
 ### 12.14 Atmospheric Gas Attenuation (ITU-R P.676-13)
 
@@ -555,16 +585,23 @@ $$A_{\text{gas}} = \frac{\gamma_{O_2} \cdot h_{O_2} + \gamma_{H_2O} \cdot h_{H_2
 
 $$P_{rx}(\text{dBm}) = \text{EIRP}(\text{dBm}) - L_{\text{fspl}} - A_{\text{rain}} - A_{\text{fog}} - A_{\text{gas}} + G_{rx,\text{ant}}$$
 
-όπου $\text{EIRP} = 85$ dBm (satellite), $G_{rx,\text{ant}} = 0$ dBi
-(default, απλοποιημένο).
+όπου $\text{EIRP} = 85.00$ dBm (satellite), $G_{rx,\text{ant}} = 68.70$ dBi
+(Viasat 13.5m — βλ. §2.4).
 
 SNR εισόδου:
 
 $$\text{SNR}_{\text{in}}(\text{dB}) = P_{rx}(\text{dBm}) - N_i(\text{dBm})$$
 
-Link Margin:
+Link Margin (όπως υπολογίζεται στο `propagation.c`):
 
-$$M(\text{dB}) = \text{SNR}_{\text{in}}(\text{dB}) - \text{SNR}_{\text{req}}(\text{dB})$$
+$$M(\text{dB}) = P_{rx}(\text{dBm}) - \text{Sensitivity}(\text{dBm})$$
+
+**Παράδειγμα @ 20 GHz, $d = 36000$ km, $\theta = 44^\circ$:**
+
+```
+P_rx   = 85.00 − 209.60 − 5.66 − 0.02 − 0.31 + 68.70 = −61.89 dBm
+Margin = −61.89 − (−61.80) = −0.09 dB  ✗ INSUFFICIENT
+```
 
 ### 12.16 Noise Injection in Time-Domain Simulation (main.c)
 
@@ -574,12 +611,24 @@ $$N_{\text{stage},i} = k \cdot T_0 \cdot B_{\text{noise}} \cdot g_i \cdot (F_i -
 
 όπου:
 - $f_s = R_s \cdot \text{SPS}$ η actual sampling frequency
-- $\text{SPS} = \text{round}(f_{rf}/R_s)$ samples per symbol
+- $\text{SPS} = \text{round}(f_{rf}/R_s)$ samples per symbol ($= 9600$ για $f_{rf} = 96$ GHz, $R_s = 10$ MHz)
 - $B_{\text{noise}} = 200$ MHz το equivalent noise bandwidth
 - Ο όρος $f_s/(2 \cdot B_{\text{noise}})$ διορθώνει για το sampling rate
 
 Ο θόρυβος εισάγεται ως complex Gaussian noise στο envelope,
 με την ισχύ να κατανέμεται ισομερώς στα I και Q κλάδια.
+
+**Συμβάσεις κλίμακας πυκνότητας θορύβου (συνεπείς σε όλη την αλυσίδα):**
+
+| Domain | Κλιμάκωση διακύμανσης ανά δείγμα | Bandwidth αναφοράς |
+|--------|----------------------------------|--------------------|
+| Real passband | $\sigma^2 \propto f_s/(2B)$ | πραγματικό σήμα εκτείνεται έως $f_s/2$ |
+| Complex baseband (μετά την decimation) | $\sigma^2 \propto f_{s,bb}/B$, με $f_{s,bb} = 80$ MHz | two-sided εύρος $f_{s,bb}$ |
+| Complex envelope | $\sigma^2 \propto f_s/B$ | two-sided εύρος $f_s$ |
+
+Με αυτές τις συμβάσεις η in-band ισχύς του θορύβου ισούται με $kT \cdot W$
+για οποιοδήποτε εύρος $W$, ανεξάρτητα από το sampling rate του εκάστοτε
+κλάδου.
 
 ### 12.17 EVM και SNR μέτρησης
 
@@ -595,7 +644,7 @@ $$\text{SNR}_{\text{dB}} = -20 \log_{10}\left(\frac{\text{EVM}_{\%}}{100}\right)
 
 | Παράμετρος | Τιμή | Μονάδα | Ορισμός |
 |------------|------|--------|---------|
-| $f_c$ | 24.0 | GHz | carrier_hz |
+| $f_c$ | 20.0 | GHz | carrier_hz |
 | $R_s$ | 10.0 | MHz | symbol_rate_hz |
 | $\alpha$ | 0.2 | — | rolloff |
 | $T_{\text{ant}}$ | 91 | K | antenna_temp_k |
@@ -603,7 +652,7 @@ $$\text{SNR}_{\text{dB}} = -20 \log_{10}\left(\frac{\text{EVM}_{\%}}{100}\right)
 | $B$ | 200 | MHz | bw_hz / B_NOISE_HZ |
 | $f_{rf}$ | 96.0 | GHz | rf_sample_rate_hz |
 | SPS | 9600 | — | round($f_{rf} / R_s$) |
-| $d$ | 35786 | km | GEO distance |
+| $d$ | 36000 | km | GEO distance |
 | $\theta$ | 44 | deg | elevation |
 | Rain $R$ | 10 | mm/h | 0.01% exceedance |
 | Fog $M$ | 0.05 | g/m³ | medium fog |

@@ -107,35 +107,4 @@ double compute_snr_db(double signal_power, double noise_power);
  */
 double compute_evm_pct(double signal_power, double noise_power);
 
-/*
- * compute_stage_metric_complex — Fill a StageMetric from complex I/Q measurements
- *
- * Computes signal power, noise power, SNR, and EVM for a complex baseband
- * signal at a given receiver stage.
- *
- * Parameters:
- *   stage  — Stage name string (e.g., "LNA", "Mixer") — NOT copied, must persist
- *   domain — Signal domain string (e.g., "complex_baseband") — NOT copied
- *   ref    — Reference (ideal) complex signal
- *   sig    — Degraded received complex signal
- *   n      — Number of samples
- *
- * Returns:
- *   A fully populated StageMetric struct
- */
-StageMetric compute_stage_metric_complex(const char *stage, const char *domain,
-                                         const Complex *restrict ref,
-                                         const Complex *restrict sig, size_t n);
-
-/*
- * compute_stage_metric_real — Fill a StageMetric from real-valued measurements
- *
- * Same as compute_stage_metric_complex but for real-valued signals.
- * EVM is always set to NaN because it's only meaningful for I/Q constellation
- * signals.
- */
-StageMetric compute_stage_metric_real(const char *stage, const char *domain,
-                                      const double *restrict ref,
-                                      const double *restrict sig, size_t n);
-
 #endif /* METRICS_H */
